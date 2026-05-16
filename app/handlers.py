@@ -1033,3 +1033,61 @@ def handle_push_event(payload: dict[str, Any], config: Config) -> str:
         return "ignored"
 
     return "ok"
+
+
+# ──────────────────────────────────────────────────────────────
+# 热修同步检查（内部定时任务 + 手动触发接口共用）
+# ──────────────────────────────────────────────────────────────
+
+def run_hotfix_sync_check(config: Config) -> list[dict]:
+    """检查热修合入 main 后超时未同步 pre 的记录，发送企微告警并写入违规记录。
+
+    返回本次触发告警的记录列表。
+    """
+    overdue = state.list_overdue_hotfix_syncs(config.hotfix_sync_threshold_hours)
+    if not overdue:
+        return []
+
+    by_project: dict[int, list[dict]] = {}
+    for item in overdue:
+        pid = item["project_id"]
+        by_project.setdefault(pid, []).append(item)
+
+    alerted: list[dict] = []
+    for project_id, items in by_project.items():
+        project_name = items[0]["project"]
+        mr_lines = "\n".join(
+            f"> - MR !{it['mr_iid']}：[{it['mr_title']}]({it['mr_url']}) "
+            f"（{it['operator_name']}，合入时间：{it['created_at']}）"
+            for it in items
+        )
+        content = (
+            f"### ⏰ 热修代码未及时同步 pre\n"
+            f"> **项目**：{project_name}\n"
+            f"> 以下热修 MR 合入 `main` 已超过 **{config.hotfix_sync_threshold_hours} 小时**，"
+            f"尚未同步到 `pre`：\n"
+            f"{mr_lines}\n\n"
+            f"**下一步**\n"
+            f"> 请执行以下命令将热修代码同步到 pre：\n"
+            f"> `ccg gitlab mr sync-pre`"
+        )
+        at_mobiles = config.tl_mobiles
+        logger.warning(
+            "Hotfix sync overdue project=%s mr_count=%s threshold_hours=%s",
+            project_name, len(items), config.hotfix_sync_threshold_hours,
+        )
+        state.record_violation(
+            operator="",
+            operator_name="",
+            violation_type="hotfix_sync_overdue",
+            description=(
+                f"热修合入 main 超过 {config.hotfix_sync_threshold_hours} 小时未同步 pre，"
+                f"涉及 MR: {[it['mr_iid'] for it in items]}"
+            ),
+            project=project_name,
+            detail={"project_id": project_id, "mr_iids": [it["mr_iid"] for it in items]},
+        )
+        send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
+        alerted.extend(items)
+
+    return alerted
