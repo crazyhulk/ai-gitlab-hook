@@ -77,7 +77,7 @@ class GitLabClient:
             logger.warning("get_mr_approvals !%s project=%s failed: %s", mr_iid, project_id, e)
             return {}
 
-    def get_merged_mrs_to_pre(self, project_id: int) -> list[dict]:
+    def get_merged_mrs_to_pre(self, project_id: int, pre_branch: str = "pre") -> list[dict]:
         mrs: list[dict] = []
         page = 1
         try:
@@ -87,7 +87,7 @@ class GitLabClient:
                     f"/projects/{project_id}/merge_requests",
                     params={
                         "state": "merged",
-                        "target_branch": "pre",
+                        "target_branch": pre_branch,
                         "per_page": 100,
                         "page": page,
                         "order_by": "merged_at",
@@ -104,13 +104,13 @@ class GitLabClient:
             logger.warning("get_merged_mrs_to_pre project=%s failed: %s", project_id, e)
         return mrs
 
-    def check_pre_verification_status(self, project_id: int) -> list[dict]:
+    def check_pre_verification_status(self, project_id: int, pre_branch: str = "pre") -> list[dict]:
         """查询 pre 上已合并 MR 关联的开放 Issue 的验收状态，返回未完成项。
 
         每项：{issue_iid, issue_title, issue_url, product_verdict, developer_verdict}
         verdict: 'pass' | 'reject' | 'pending'
         """
-        mrs = self.get_merged_mrs_to_pre(project_id)
+        mrs = self.get_merged_mrs_to_pre(project_id, pre_branch)
         issue_iids: set[int] = set()
         for mr in mrs:
             desc = mr.get("description") or ""

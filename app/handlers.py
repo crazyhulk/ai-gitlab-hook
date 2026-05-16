@@ -493,7 +493,7 @@ def _on_mr_open(
         else:
             project_id = (payload.get("project") or {}).get("id")
             try:
-                incomplete = config.gitlab_client.check_pre_verification_status(project_id)
+                incomplete = config.gitlab_client.check_pre_verification_status(project_id, config.pre_branch)
             except Exception as e:
                 logger.warning("Pre verification check failed for MR !%s: %s", mr_iid, e)
                 incomplete = []
