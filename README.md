@@ -49,6 +49,11 @@ Issue 类型根据 description 中的模板章节自动识别，无需标题前�
 | 热修目标分支错误 | `hotfix_*` → `pre` 的 MR | 操作人 + TL |
 | 上线 MR 验收未完成 | `pre` → `main` MR 创建时实时查 GitLab，有 Issue 未完成 `product:pass` + `developer:pass` | 操作人 + TL |
 | Issue 无人认领即关闭 | Issue 关闭时 assignees 为空 | TL |
+| Issue 负责人被全部移除 | Issue update 时 assignees 由有变无 | TL |
+| MR 缺少 Issue 关联 | `issue_*`/`hotfix_*` MR 描述无 `Closes #xxx`，未通过 `ccg mr create` | 操作人 + TL |
+| MR 标题不符规范 | `issue_*` MR 标题不以 `[需求]` 开头，或 `hotfix_*` 不以 `[Bug热修]` 开头 | 操作人 + TL |
+| Issue 未验收即关闭 | 需求/优化 Issue 关闭时查 GitLab API，无 `product:pass` 记录 | 操作人 + TL |
+| MR 审批不足即合并 | `issue_*`/`hotfix_*` MR 合并时查 GitLab API，Approve 数不足要求（绕过 `ccg mr merge`） | 操作人 + TL |
 
 ## 快速开始
 

@@ -97,12 +97,35 @@ def handle_issue_event(payload: dict[str, Any], config: Config) -> str:
         if is_feature or is_bug:
             notified = False
             if "assignees" in changes:
-                new_assignees = _diff_assignees(changes["assignees"])
+                assignees_change = changes["assignees"]
+                new_assignees = _diff_assignees(assignees_change)
                 if new_assignees:
                     _on_issue_assignee_change(
                         config, issue_iid, issue_title, issue_url,
                         reporter_name, new_assignees, is_bug=is_bug, issue_type=issue_type,
                     )
+                    notified = True
+                elif not (assignees_change.get("current") or []) and (assignees_change.get("previous") or []):
+                    type_label = "Bug" if is_bug else ("优化" if issue_type == "improve" else "需求")
+                    content = (
+                        f"### ⚠️ Issue 负责人被全部移除\n"
+                        f"> **Issue #{issue_iid}**：{issue_title}\n"
+                        f"> **类型**：{type_label}\n"
+                        f"> **操作人**：{reporter_name}\n"
+                        f"> [查看 Issue]({issue_url})\n\n"
+                        f"**注意**：此 Issue 当前无人负责，请重新指派研发。"
+                    )
+                    at_mobiles = config.tl_mobiles
+                    logger.warning("Issue #%s all assignees removed type=%s project=%s", issue_iid, issue_type, project_name)
+                    state.record_violation(
+                        operator=reporter_username,
+                        operator_name=reporter_name,
+                        violation_type="issue_assignee_all_removed",
+                        description=f"Issue #{issue_iid}「{issue_title}」负责人被全部移除",
+                        project=project_name,
+                        detail={"issue_iid": issue_iid, "issue_type": issue_type, "issue_url": issue_url},
+                    )
+                    send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
                     notified = True
             if "description" in changes:
                 prev_description = (changes.get("description") or {}).get("previous", "") or ""
@@ -119,9 +142,8 @@ def handle_issue_event(payload: dict[str, Any], config: Config) -> str:
         return "ignored"
 
     if action == "close":
+        notified = False
         if not assignees and issue_type in ("feature", "improve", "bug"):
-            project = payload.get("project", {}) or {}
-            project_name = project.get("name", "")
             type_label = {"bug": "Bug", "improve": "优化"}.get(issue_type or "", "需求")
             content = (
                 f"### ⚠️ Issue 无人认领即关闭\n"
@@ -142,8 +164,45 @@ def handle_issue_event(payload: dict[str, Any], config: Config) -> str:
                 detail={"issue_iid": issue_iid, "issue_type": issue_type, "issue_url": issue_url},
             )
             send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
-            return "ok"
-        return "ignored"
+            notified = True
+
+        if issue_type in ("feature", "improve") and assignees and config.gitlab_client:
+            project_id = (payload.get("project") or {}).get("id")
+            if project_id:
+                notes = config.gitlab_client.get_issue_notes(project_id, issue_iid)
+                product_verdict = config.gitlab_client._latest_verdict(notes, "product")
+                if product_verdict != "pass":
+                    type_label = "优化" if issue_type == "improve" else "需求"
+                    verdict_label = "已拒绝" if product_verdict == "reject" else "未验收"
+                    content = (
+                        f"### ⚠️ {type_label} Issue 未完成产品验收即关闭\n"
+                        f"> **Issue #{issue_iid}**：{issue_title}\n"
+                        f"> **关闭人**：{reporter_name}\n"
+                        f"> **产品验收状态**：{verdict_label}\n"
+                        f"> [查看 Issue]({issue_url})\n\n"
+                        f"**注意**：该 {type_label} Issue 尚无 `product:pass` 记录即被关闭，"
+                        f"请确认功能是否经过产品验收，或补充验收口令后重新关闭。"
+                    )
+                    at_mobiles = list(dict.fromkeys(
+                        config.tl_mobiles + config.resolve_wechat_ids(assignee_usernames + [reporter_username])
+                    ))
+                    logger.warning(
+                        "Issue #%s closed without product:pass type=%s verdict=%s project=%s",
+                        issue_iid, issue_type, product_verdict, project_name,
+                    )
+                    state.record_violation(
+                        operator=reporter_username,
+                        operator_name=reporter_name,
+                        violation_type="issue_closed_no_product_pass",
+                        description=f"Issue #{issue_iid}「{issue_title}」未完成产品验收即关闭（{verdict_label}）",
+                        project=project_name,
+                        detail={"issue_iid": issue_iid, "issue_type": issue_type,
+                                "product_verdict": product_verdict, "issue_url": issue_url},
+                    )
+                    send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
+                    notified = True
+
+        return "ok" if notified else "ignored"
 
     logger.info("Issue event action=%s not handled", action)
     return "ignored"
@@ -336,6 +395,7 @@ def _on_issue_update(
 # ──────────────────────────────────────────────────────────────
 
 _MAIN_BRANCHES = {"main", "master"}
+_CLOSES_RE = re.compile(r"[Cc]loses\s+#\d+")
 
 
 def _on_mr_open(
@@ -402,6 +462,54 @@ def _on_mr_open(
         send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
         violations_found = True
 
+    # feature/hotfix MR 缺少 Closes #xxx（未通过 ccg mr create 创建）
+    if source_branch.startswith(("issue_", "hotfix_")):
+        mr_description = attrs.get("description") or ""
+        if not _CLOSES_RE.search(mr_description):
+            content = (
+                f"### ⚠️ MR 未关联 Issue（缺少 Closes #xxx）\n"
+                f"> **MR !{mr_iid}**：{mr_title}\n"
+                f"> **操作人**：{author_name}（`{author_username}`）\n"
+                f"> `{source_branch}` → `{target_branch}`\n"
+                f"> [查看 MR]({mr_url})\n\n"
+                f"**注意**：MR 描述中未找到 `Closes #xxx` 引用，可能未通过 `ccg gitlab mr create` 创建。"
+                f"缺少关联将导致 Issue 无法自动关闭，且上线时无法追踪验收状态。"
+            )
+            at_mobiles = list(dict.fromkeys(config.tl_mobiles + config.resolve_wechat_ids([author_username])))
+            logger.warning("MR !%s missing Closes ref source=%s author=%s project=%s", mr_iid, source_branch, author_username, project_name)
+            state.record_violation(
+                operator=author_username, operator_name=author_name,
+                violation_type="mr_missing_closes_ref",
+                description=f"MR !{mr_iid}「{mr_title}」描述缺少 Closes #xxx，可能未通过 ccg 创建",
+                project=project_name,
+                detail={"mr_iid": mr_iid, "source_branch": source_branch, "target_branch": target_branch, "mr_url": mr_url},
+            )
+            send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
+            violations_found = True
+
+        expected_prefix = "[需求]" if source_branch.startswith("issue_") else "[Bug热修]"
+        if not mr_title.startswith(expected_prefix):
+            content = (
+                f"### ⚠️ MR 标题不符规范（可能未通过 ccg 创建）\n"
+                f"> **MR !{mr_iid}**：{mr_title}\n"
+                f"> **操作人**：{author_name}（`{author_username}`）\n"
+                f"> `{source_branch}` → `{target_branch}`\n"
+                f"> [查看 MR]({mr_url})\n\n"
+                f"**注意**：{'需求' if source_branch.startswith('issue_') else '热修'} MR 标题应以 `{expected_prefix}` 开头，"
+                f"请确认是否通过 `ccg gitlab mr create` 创建。"
+            )
+            at_mobiles = list(dict.fromkeys(config.tl_mobiles + config.resolve_wechat_ids([author_username])))
+            logger.warning("MR !%s title format mismatch title=%r source=%s author=%s project=%s", mr_iid, mr_title, source_branch, author_username, project_name)
+            state.record_violation(
+                operator=author_username, operator_name=author_name,
+                violation_type="mr_title_format",
+                description=f"MR !{mr_iid}「{mr_title}」标题不符 ccg 规范（应以 {expected_prefix} 开头）",
+                project=project_name,
+                detail={"mr_iid": mr_iid, "mr_title": mr_title, "expected_prefix": expected_prefix, "mr_url": mr_url},
+            )
+            send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
+            violations_found = True
+
     # 上线 MR（pre → main），检查 pre 双向验收是否完成
     if source_branch == "pre" and target_branch in _MAIN_BRANCHES:
         if config.gitlab_client is None:
@@ -445,12 +553,78 @@ def _on_mr_open(
     return "ok" if violations_found else "ignored"
 
 
+def _on_mr_merged(
+    payload: dict[str, Any],
+    attrs: dict[str, Any],
+    config: Config,
+) -> str:
+    source_branch: str = attrs.get("source_branch", "")
+    if not source_branch.startswith(("issue_", "hotfix_")):
+        return "ignored"
+
+    if config.gitlab_client is None:
+        logger.warning("GitLab client not configured, skipping merge approval check")
+        return "ignored"
+
+    mr_iid = attrs.get("iid", "?")
+    mr_title = attrs.get("title", "")
+    mr_url = attrs.get("url", "")
+    target_branch: str = attrs.get("target_branch", "")
+
+    user = payload.get("user", {}) or {}
+    author_name = user.get("name", "")
+    author_username = user.get("username", "")
+
+    project = payload.get("project", {}) or {}
+    project_id = project.get("id")
+    project_name = project.get("name", "")
+
+    required = config.hotfix_required_approvals if source_branch.startswith("hotfix_") else 1
+
+    approvals = config.gitlab_client.get_mr_approvals(project_id, mr_iid)
+    approved_count = len(approvals.get("approved_by") or [])
+
+    if approved_count >= required:
+        logger.info("MR !%s merged with sufficient approval %s/%s", mr_iid, approved_count, required)
+        return "ignored"
+
+    type_label = "热修" if source_branch.startswith("hotfix_") else "需求"
+    content = (
+        f"### ⚠️ {type_label} MR 审批不足即合并（绕过 ccg 门禁）\n"
+        f"> **MR !{mr_iid}**：{mr_title}\n"
+        f"> **操作人**：{author_name}（`{author_username}`）\n"
+        f"> `{source_branch}` → `{target_branch}`\n"
+        f"> **审批状态**：{approved_count}/{required} 人 Approve\n"
+        f"> [查看 MR]({mr_url})\n\n"
+        f"**注意**：{type_label} MR 需要 {required} 人 Approve 才允许合并，"
+        f"此次合并可能直接在 GitLab 页面操作，绕过了 `ccg gitlab mr merge` 门禁检查。"
+    )
+    at_mobiles = list(dict.fromkeys(config.tl_mobiles + config.resolve_wechat_ids([author_username])))
+    logger.warning(
+        "MR !%s merged without sufficient approval %s/%s author=%s project=%s",
+        mr_iid, approved_count, required, author_username, project_name,
+    )
+    state.record_violation(
+        operator=author_username, operator_name=author_name,
+        violation_type="mr_merged_without_approval",
+        description=f"MR !{mr_iid}「{mr_title}」审批不足即合并（{approved_count}/{required}），可能绕过 ccg 门禁",
+        project=project_name,
+        detail={"mr_iid": mr_iid, "approved_count": approved_count, "required": required,
+                "source_branch": source_branch, "mr_url": mr_url},
+    )
+    send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
+    return "ok"
+
+
 def handle_mr_event(payload: dict[str, Any], config: Config) -> str:
     attrs = payload.get("object_attributes", {}) or {}
     action = attrs.get("action", "")
 
     if action == "open":
         return _on_mr_open(payload, attrs, config)
+
+    if action == "merge":
+        return _on_mr_merged(payload, attrs, config)
 
     if action != "approved":
         logger.info("MR event action=%s, ignored", action)

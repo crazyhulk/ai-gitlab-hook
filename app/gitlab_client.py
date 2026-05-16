@@ -70,6 +70,13 @@ class GitLabClient:
             logger.warning("get_issue_notes #%s project=%s failed: %s", issue_iid, project_id, e)
         return notes
 
+    def get_mr_approvals(self, project_id: int, mr_iid: int) -> dict:
+        try:
+            return self._request("GET", f"/projects/{project_id}/merge_requests/{mr_iid}/approvals")
+        except GitLabError as e:
+            logger.warning("get_mr_approvals !%s project=%s failed: %s", mr_iid, project_id, e)
+            return {}
+
     def get_merged_mrs_to_pre(self, project_id: int) -> list[dict]:
         mrs: list[dict] = []
         page = 1
