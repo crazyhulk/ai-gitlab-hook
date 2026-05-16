@@ -24,9 +24,9 @@ async def _hotfix_sync_loop() -> None:
     while True:
         await asyncio.sleep(interval)
         try:
+            logger.info("Hotfix sync check: scanning overdue records (threshold=%sh)", config.hotfix_sync_threshold_hours)
             alerted = run_hotfix_sync_check(state.get_config())
-            if alerted:
-                logger.info("Hotfix sync check: alerted %s overdue records", len(alerted))
+            logger.info("Hotfix sync check: done alerted=%s", len(alerted))
         except Exception as exc:
             logger.exception("Hotfix sync check failed: %s", exc)
 

@@ -21,7 +21,7 @@ tl_usernames:
 
 hotfix_required_approvals: 2
 hotfix_sync_threshold_hours: 4        # 热修合入 main 后超过此小时数未同步 pre 则告警
-hotfix_sync_check_interval_seconds: 3600  # 内部定时检查间隔（秒），默认每小时一次
+hotfix_sync_check_interval_seconds: 60    # 内部定时检查间隔（秒），默认每分钟一次
 
 user_map:
   gitlab_username1: "1xxxxxxxxxx"
