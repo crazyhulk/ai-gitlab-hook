@@ -13,6 +13,9 @@ wechat:
 gitlab:
   secret_token: "YOUR_GITLAB_WEBHOOK_SECRET"
 
+main_branch: main        # 生产主干分支名，与 GITLAB_BRANCH_MAIN 保持一致
+pre_branch: pre          # 预发布分支名，与 GITLAB_BRANCH_PRE 保持一致
+
 tl_usernames:
   - your_tl_gitlab_username
 

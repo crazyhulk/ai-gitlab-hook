@@ -142,6 +142,8 @@ GET /violations?start=2026-05-01&end=2026-05-16
 | `gitlab.secret_token` | `GITLAB_WEBHOOK_SECRET` | GitLab Webhook Secret Token（可选） |
 | `gitlab.url` | `GITLAB_URL` | GitLab 地址，用于主动查询 API |
 | `gitlab.token` | `GITLAB_PRIVATE_TOKEN` | GitLab Personal Access Token，需 `api` 权限 |
+| `main_branch` | `GITLAB_BRANCH_MAIN` | 生产主干分支名，默认 `main`（与 ai-workflow 保持一致） |
+| `pre_branch` | `GITLAB_BRANCH_PRE` | 预发布分支名，默认 `pre`（与 ai-workflow 保持一致） |
 | `tl_usernames` | `TL_USERNAMES=user1,user2` | TL / Reviewer 的 GitLab 用户名，违规告警及热修紧急路径额外 @ |
 | `hotfix_required_approvals` | `HOTFIX_REQUIRED_APPROVALS` | 热修紧急路径（→ `main`）所需最少 Approve 人数，默认 2；非紧急路径（→ `pre`）固定为 1 |
 | `hotfix_sync_threshold_hours` | `HOTFIX_SYNC_THRESHOLD_HOURS` | 热修合入 `main` 后超过此小时数未同步 `pre` 则告警，默认 4 |

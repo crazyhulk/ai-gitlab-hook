@@ -46,6 +46,9 @@ class Config:
     user_map: dict[str, str] = field(default_factory=dict)
     # Reviewer / TL 的 GitLab 用户名列表，用于热修/上线时额外 @ 通知
     tl_usernames: list[str] = field(default_factory=list)
+    # 分支名配置（与 ai-workflow 保持一致）
+    main_branch: str = "main"
+    pre_branch: str = "pre"
     # 热修 MR 所需最少 Approve 人数（需求 MR 固定为 1；hotfix→pre 固定为 1）
     hotfix_required_approvals: int = 2
     # hotfix 合入 main 后，超过此小时数未同步 pre 则触发告警
@@ -106,6 +109,9 @@ def load_config(path: str = "config.yaml") -> Config:
     if env_tl:
         tl_usernames = [x.strip() for x in env_tl.split(",") if x.strip()]
 
+    main_branch = os.environ.get("GITLAB_BRANCH_MAIN", str(data.get("main_branch", "main")))
+    pre_branch = os.environ.get("GITLAB_BRANCH_PRE", str(data.get("pre_branch", "pre")))
+
     hotfix_required_approvals = int(
         os.environ.get(
             "HOTFIX_REQUIRED_APPROVALS",
@@ -151,6 +157,8 @@ def load_config(path: str = "config.yaml") -> Config:
         ),
         user_map=user_map,
         tl_usernames=tl_usernames,
+        main_branch=main_branch,
+        pre_branch=pre_branch,
         hotfix_required_approvals=hotfix_required_approvals,
         hotfix_sync_threshold_hours=hotfix_sync_threshold_hours,
         hotfix_sync_check_interval_seconds=hotfix_sync_check_interval_seconds,

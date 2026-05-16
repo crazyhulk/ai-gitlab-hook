@@ -393,7 +393,6 @@ def _on_issue_update(
 #   - 上线 MR 创建时 pre 双向验收未完成
 # ──────────────────────────────────────────────────────────────
 
-_MAIN_BRANCHES = {"main", "master"}
 _CLOSES_RE = re.compile(r"[Cc]loses\s+#\d+")
 
 
@@ -418,14 +417,14 @@ def _on_mr_open(
     violations_found = False
 
     # 功能分支直接合入 main，跳过 pre
-    if source_branch.startswith("issue_") and target_branch in _MAIN_BRANCHES:
+    if source_branch.startswith("issue_") and target_branch == config.main_branch:
         content = (
             f"### ⚠️ 功能分支直接合入 {target_branch}，违反上线流程\n"
             f"> **MR !{mr_iid}**：{mr_title}\n"
             f"> **操作人**：{author_name}（`{author_username}`）\n"
             f"> `{source_branch}` → `{target_branch}`\n"
             f"> [查看 MR]({mr_url})\n\n"
-            f"**注意**：功能分支应先合入 `pre` 完成验收，再通过上线 MR 合入 `{target_branch}`。"
+            f"**注意**：功能分支应先合入 `{config.pre_branch}` 完成验收，再通过上线 MR 合入 `{target_branch}`。"
         )
         at_mobiles = list(dict.fromkeys(config.tl_mobiles + config.resolve_wechat_ids([author_username])))
         logger.warning("MR !%s feature branch direct to %s author=%s project=%s", mr_iid, target_branch, author_username, project_name)
@@ -488,7 +487,7 @@ def _on_mr_open(
             violations_found = True
 
     # 上线 MR（pre → main），检查 pre 双向验收是否完成
-    if source_branch == "pre" and target_branch in _MAIN_BRANCHES:
+    if source_branch == config.pre_branch and target_branch == config.main_branch:
         if config.gitlab_client is None:
             logger.warning("GitLab client not configured, skipping pre verification check for MR !%s", mr_iid)
         else:
@@ -542,8 +541,8 @@ def _on_mr_merged(
     project_id = project.get("id")
     project_name = project.get("name", "")
 
-    # main/master → pre 热修同步完成，清除待同步记录
-    if source_branch in _MAIN_BRANCHES and target_branch == "pre":
+    # main → pre 热修同步完成，清除待同步记录
+    if source_branch == config.main_branch and target_branch == config.pre_branch:
         if project_id:
             cleared = state.clear_hotfix_sync_pending(project_id)
             if cleared:
@@ -568,7 +567,7 @@ def _on_mr_merged(
     author_name = user.get("name", "")
     author_username = user.get("username", "")
 
-    is_hotfix_to_main = source_branch.startswith("hotfix_") and target_branch in _MAIN_BRANCHES
+    is_hotfix_to_main = source_branch.startswith("hotfix_") and target_branch == config.main_branch
     required = config.hotfix_required_approvals if is_hotfix_to_main else 1
 
     approvals = config.gitlab_client.get_mr_approvals(project_id, mr_iid)
@@ -664,8 +663,8 @@ def handle_mr_event(payload: dict[str, Any], config: Config) -> str:
     # 判断 MR 类型
     is_feature = source_branch.startswith("issue_")
     is_hotfix = source_branch.startswith("hotfix_")
-    is_release = source_branch == "pre"
-    is_sync_pre = (source_branch == "main" or source_branch == "master") and target_branch.startswith("pre")
+    is_release = source_branch == config.pre_branch
+    is_sync_pre = source_branch == config.main_branch and target_branch == config.pre_branch
 
     at_mobiles = config.resolve_wechat_ids(assignee_usernames)
 
@@ -682,7 +681,7 @@ def handle_mr_event(payload: dict[str, Any], config: Config) -> str:
         )
 
     elif is_hotfix:
-        if target_branch in _MAIN_BRANCHES:
+        if target_branch == config.main_branch:
             # 紧急路径：直接上线，需多人审批，额外 @ TL
             required = config.hotfix_required_approvals
             content = (
@@ -955,11 +954,8 @@ def _handle_verdict_comment(
 
 # ──────────────────────────────────────────────────────────────
 # Push Hook
-# 告警节点：有人直接 push 到受保护分支（main / master / pre），绕过 MR 审批流程
+# 告警节点：有人直接 push 到受保护分支（main_branch / pre_branch），绕过 MR 审批流程
 # ──────────────────────────────────────────────────────────────
-
-_PROTECTED_BRANCHES = {"main", "master", "pre"}
-
 
 def handle_push_event(payload: dict[str, Any], config: Config) -> str:
     ref: str = payload.get("ref", "")
@@ -1006,7 +1002,7 @@ def handle_push_event(payload: dict[str, Any], config: Config) -> str:
         notified = True
 
     # 直接推送到受保护分支（未经 MR）
-    if branch in _PROTECTED_BRANCHES:
+    if branch in {config.main_branch, config.pre_branch}:
         content = (
             f"### ⚠️ 直接 Push 到受保护分支\n"
             f"> **项目**：{project_name}\n"
