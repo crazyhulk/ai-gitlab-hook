@@ -1,0 +1,23 @@
+server:
+  host: "0.0.0.0"
+  port: 8021
+
+log:
+  level: "INFO"       # DEBUG / INFO / WARNING / ERROR
+  dir: "./logs"
+  file: "gitlab-hook.log"
+
+wechat:
+  webhook_url: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=YOUR_WECHAT_WEBHOOK_KEY"
+
+gitlab:
+  secret_token: "YOUR_GITLAB_WEBHOOK_SECRET"
+
+tl_usernames:
+  - your_tl_gitlab_username
+
+hotfix_required_approvals: 2
+
+user_map:
+  gitlab_username1: "1xxxxxxxxxx"
+  gitlab_username2: "1xxxxxxxxxx"

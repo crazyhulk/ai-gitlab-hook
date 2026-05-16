@@ -1,0 +1,13 @@
+state.db
+run.pid
+config.yaml
+deploy.sh
+logs/
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+*.egg-info/
+.env
+.env.*
