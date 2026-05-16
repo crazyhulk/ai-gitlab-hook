@@ -28,17 +28,8 @@ def _get_conn() -> sqlite3.Connection:
         _conn.row_factory = sqlite3.Row
         _conn.executescript(
             """
-            CREATE TABLE IF NOT EXISTS invalid_issues (
-                issue_id   INTEGER PRIMARY KEY,
-                created_at TEXT NOT NULL DEFAULT (datetime('now'))
-            );
-
-            CREATE TABLE IF NOT EXISTS pre_verifications (
-                issue_id   INTEGER NOT NULL,
-                role       TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                PRIMARY KEY (issue_id, role)
-            );
+            DROP TABLE IF EXISTS invalid_issues;
+            DROP TABLE IF EXISTS pre_verifications;
 
             CREATE TABLE IF NOT EXISTS violations (
                 id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,85 +63,6 @@ def get_config() -> Config:
     if _config is None:
         raise RuntimeError("Config not initialized")
     return _config
-
-
-# ──────────────────────────────────────────────────────────────
-# 不合规 Issue 状态
-# ──────────────────────────────────────────────────────────────
-
-def mark_issue_invalid(issue_id: int) -> None:
-    with _db_lock:
-        conn = _get_conn()
-        conn.execute(
-            "INSERT OR IGNORE INTO invalid_issues (issue_id) VALUES (?)",
-            (issue_id,),
-        )
-        conn.commit()
-
-
-def mark_issue_valid(issue_id: int) -> None:
-    with _db_lock:
-        conn = _get_conn()
-        conn.execute("DELETE FROM invalid_issues WHERE issue_id = ?", (issue_id,))
-        conn.commit()
-
-
-def is_issue_known_invalid(issue_id: int) -> bool:
-    with _db_lock:
-        conn = _get_conn()
-        row = conn.execute(
-            "SELECT 1 FROM invalid_issues WHERE issue_id = ?", (issue_id,)
-        ).fetchone()
-        return row is not None
-
-
-# ──────────────────────────────────────────────────────────────
-# Pre 验收状态
-# ──────────────────────────────────────────────────────────────
-
-def mark_pre_pass(issue_id: int, role: str) -> None:
-    """role: 'product' 或 'developer'"""
-    with _db_lock:
-        conn = _get_conn()
-        conn.execute(
-            "INSERT OR REPLACE INTO pre_verifications (issue_id, role) VALUES (?, ?)",
-            (issue_id, role),
-        )
-        conn.commit()
-
-
-def get_pre_status(issue_id: int) -> set[str]:
-    """返回该 issue 已通过的角色集合，例如 {'product'} 或 {'product', 'developer'}"""
-    with _db_lock:
-        conn = _get_conn()
-        rows = conn.execute(
-            "SELECT role FROM pre_verifications WHERE issue_id = ?", (issue_id,)
-        ).fetchall()
-        return {row["role"] for row in rows}
-
-
-def get_incomplete_pre_verifications() -> list[int]:
-    """返回只完成了一方验收（未双向通过）的 issue_id 列表"""
-    with _db_lock:
-        conn = _get_conn()
-        rows = conn.execute(
-            """
-            SELECT issue_id
-            FROM pre_verifications
-            GROUP BY issue_id
-            HAVING COUNT(DISTINCT role) < 2
-            """
-        ).fetchall()
-        return [row["issue_id"] for row in rows]
-
-
-def clear_pre_verifications(issue_id: int) -> None:
-    with _db_lock:
-        conn = _get_conn()
-        conn.execute(
-            "DELETE FROM pre_verifications WHERE issue_id = ?", (issue_id,)
-        )
-        conn.commit()
 
 
 # ──────────────────────────────────────────────────────────────

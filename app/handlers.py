@@ -46,9 +46,9 @@ def _detect_issue_type(description: str) -> str | None:
 def handle_issue_event(payload: dict[str, Any], config: Config) -> str:
     attrs = payload.get("object_attributes", {}) or {}
     action = attrs.get("action", "")
+    changes = payload.get("changes") or {}
     if not action:
         issue_state = attrs.get("state", "")
-        changes = payload.get("changes") or {}
         if issue_state == "opened":
             action = "update" if changes else "open"
         elif issue_state in ("closed", "reopened"):
@@ -78,7 +78,7 @@ def handle_issue_event(payload: dict[str, Any], config: Config) -> str:
         action, issue_iid, issue_type, issue_title, project_name, reporter_username, assignee_usernames,
     )
 
-    if action == "open":
+    if action in ("open", "reopen"):
         if is_feature:
             return _on_feature_issue_open(
                 config, issue_iid, issue_title, issue_url, description,
@@ -95,11 +95,16 @@ def handle_issue_event(payload: dict[str, Any], config: Config) -> str:
 
     if action == "update":
         if is_feature or is_bug:
+            if "description" not in changes:
+                logger.info("Issue #%s updated but description unchanged, skipping", issue_iid)
+                return "ignored"
+            prev_description = (changes.get("description") or {}).get("previous", "") or ""
             return _on_issue_update(
                 config, issue_iid, issue_title, issue_url, description,
                 reporter_name, reporter_username, assignee_names, assignee_usernames,
                 is_bug=is_bug,
                 issue_type=issue_type,
+                prev_description=prev_description,
             )
         return "ignored"
 
@@ -144,7 +149,6 @@ def _on_feature_issue_open(
     type_label = "优化" if issue_type == "improve" else "需求"
     missing = _missing_sections(description, sections)
     if missing:
-        state.mark_issue_invalid(int(issue_iid))
         missing_str = "、".join(missing)
         content = (
             f"### {type_label} Issue 格式不合规\n"
@@ -187,7 +191,6 @@ def _on_bug_issue_open(
 ) -> str:
     missing = _missing_sections(description, _BUG_SECTIONS)
     if missing:
-        state.mark_issue_invalid(int(issue_iid))
         missing_str = "、".join(missing)
         content = (
             f"### Bug Issue 格式不合规\n"
@@ -230,24 +233,25 @@ def _on_issue_update(
     reporter_name, reporter_username, assignee_names, assignee_usernames,
     is_bug: bool,
     issue_type: str | None = None,
+    prev_description: str = "",
 ) -> str:
-    if not state.is_issue_known_invalid(int(issue_iid)):
-        logger.info("Issue #%s updated but not previously marked invalid, skipping", issue_iid)
-        return "ignored"
-
     if is_bug:
         sections = _BUG_SECTIONS
     elif issue_type == "improve":
         sections = _IMPROVE_SECTIONS
     else:
         sections = _FEATURE_SECTIONS
+
+    if not _missing_sections(prev_description, sections):
+        logger.info("Issue #%s description updated but was already valid before, skipping", issue_iid)
+        return "ignored"
+
     missing = _missing_sections(description, sections)
     if missing:
         logger.info("Issue #%s updated but still invalid missing=%s, no notification", issue_iid, missing)
         return "ignored"
 
-    # 从不合规变为合规 → 通知研发重新认领
-    state.mark_issue_valid(int(issue_iid))
+    # 变更前不合规 → 变更后合规 → 通知研发认领
     cmd = f"ccg gitlab hotfix start {issue_iid}" if is_bug else f"ccg gitlab feature start {issue_iid}"
     type_label = "Bug" if is_bug else ("优化" if issue_type == "improve" else "需求")
     assignee_str = "、".join(assignee_names) if assignee_names else "（待指派）"
@@ -348,28 +352,43 @@ def _on_mr_open(
 
     # 上线 MR（pre → main），检查 pre 双向验收是否完成
     if source_branch == "pre" and target_branch in _MAIN_BRANCHES:
-        incomplete = state.get_incomplete_pre_verifications()
-        if incomplete:
-            issue_list = "、".join(f"#{iid}" for iid in incomplete[:10])
-            content = (
-                f"### ⚠️ 上线 MR 创建，但 pre 验收未完成\n"
-                f"> **MR !{mr_iid}**：{mr_title}\n"
-                f"> **操作人**：{author_name}（`{author_username}`）\n"
-                f"> [查看 MR]({mr_url})\n\n"
-                f"**以下 Issue 仅完成单方验收**：{issue_list}\n\n"
-                f"**注意**：上线前需 `product:pass` 和 `developer:pass` 双方均通过，请确认后再合并。"
-            )
-            at_mobiles = list(dict.fromkeys(config.tl_mobiles + config.resolve_wechat_ids([author_username])))
-            logger.warning("Release MR !%s created but incomplete pre verifications: %s", mr_iid, incomplete)
-            state.record_violation(
-                operator=author_username, operator_name=author_name,
-                violation_type="mr_release_unverified",
-                description=f"MR !{mr_iid}「{mr_title}」上线前 pre 验收未完成，涉及 Issue: {issue_list}",
-                project=project_name,
-                detail={"mr_iid": mr_iid, "incomplete_issues": incomplete, "mr_url": mr_url},
-            )
-            send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
-            violations_found = True
+        if config.gitlab_client is None:
+            logger.warning("GitLab client not configured, skipping pre verification check for MR !%s", mr_iid)
+        else:
+            project_id = (payload.get("project") or {}).get("id")
+            try:
+                incomplete = config.gitlab_client.check_pre_verification_status(project_id)
+            except Exception as e:
+                logger.warning("Pre verification check failed for MR !%s: %s", mr_iid, e)
+                incomplete = []
+            if incomplete:
+                _verdict_label = {"pass": "✓ 已通过", "reject": "✗ 已拒绝", "pending": "✗ 未验收"}
+                issue_lines = "\n".join(
+                    f"> **Issue #{item['issue_iid']}**：[{item['issue_title']}]({item['issue_url']})\n"
+                    f">   产品：{_verdict_label[item['product_verdict']]}　　"
+                    f"研发：{_verdict_label[item['developer_verdict']]}"
+                    for item in incomplete
+                )
+                issue_ids = [item["issue_iid"] for item in incomplete]
+                content = (
+                    f"### ⚠️ 上线 MR 创建，但 pre 验收未完成\n"
+                    f"> **MR !{mr_iid}**：{mr_title}\n"
+                    f"> **操作人**：{author_name}（`{author_username}`）\n"
+                    f"> [查看 MR]({mr_url})\n\n"
+                    f"{issue_lines}\n\n"
+                    f"**注意**：上线前需 `product:pass` 和 `developer:pass` 双方均通过，请确认后再合并。"
+                )
+                at_mobiles = list(dict.fromkeys(config.tl_mobiles + config.resolve_wechat_ids([author_username])))
+                logger.warning("Release MR !%s created but incomplete pre verifications: %s", mr_iid, issue_ids)
+                state.record_violation(
+                    operator=author_username, operator_name=author_name,
+                    violation_type="mr_release_unverified",
+                    description=f"MR !{mr_iid}「{mr_title}」上线前 pre 验收未完成，涉及 Issue: {issue_ids}",
+                    project=project_name,
+                    detail={"mr_iid": mr_iid, "incomplete_issues": issue_ids, "mr_url": mr_url},
+                )
+                send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
+                violations_found = True
 
     return "ok" if violations_found else "ignored"
 
@@ -684,9 +703,6 @@ def _handle_verdict_comment(
         f"> [查看评论]({note_url})\n\n"
         f"{next_steps}"
     )
-
-    if is_pass and isinstance(issue_iid, int):
-        state.mark_pre_pass(issue_iid, role)
 
     logger.info(
         "Verdict note issue=#%s role=%s verdict=%s commenter=%s at_mobiles=%s",

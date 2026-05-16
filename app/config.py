@@ -1,8 +1,14 @@
+from __future__ import annotations
+
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
+
+if TYPE_CHECKING:
+    from .gitlab_client import GitLabClient
 
 
 @dataclass
@@ -26,6 +32,8 @@ class WechatConfig:
 @dataclass
 class GitlabConfig:
     secret_token: str = ""
+    url: str = ""
+    token: str = ""
 
 
 @dataclass
@@ -40,6 +48,13 @@ class Config:
     tl_usernames: list[str] = field(default_factory=list)
     # 热修 MR 所需最少 Approve 人数（需求 MR 固定为 1）
     hotfix_required_approvals: int = 2
+    # 由 __post_init__ 按 gitlab.url/token 自动初始化，无需手动设置
+    gitlab_client: GitLabClient | None = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.gitlab.url and self.gitlab.token:
+            from .gitlab_client import GitLabClient
+            self.gitlab_client = GitLabClient(self.gitlab.url, self.gitlab.token)
 
     def resolve_wechat_ids(self, gitlab_usernames: list[str]) -> list[str]:
         seen: set[str] = set()
@@ -113,6 +128,8 @@ def load_config(path: str = "config.yaml") -> Config:
             secret_token=os.environ.get(
                 "GITLAB_WEBHOOK_SECRET", str(g.get("secret_token", ""))
             ),
+            url=os.environ.get("GITLAB_URL", str(g.get("url", ""))),
+            token=os.environ.get("GITLAB_PRIVATE_TOKEN", str(g.get("token", ""))),
         ),
         user_map=user_map,
         tl_usernames=tl_usernames,
