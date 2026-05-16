@@ -19,8 +19,8 @@ GitLab Webhook 接收服务，将 GitLab 事件转化为企业微信群消息，
 | **MR approved** | 需求 MR（`issue_*` 分支）通过 | 研发 |
 | **MR approved** | 热修 MR（`hotfix_*` → `main`，紧急路径）通过 | 研发 + TL |
 | **MR approved** | 热修 MR（`hotfix_*` → `pre`，非紧急路径）通过 | 研发 |
-| **MR approved** | 上线 MR（`pre` 分支）通过 | 研发 |
-| **MR approved** | 热修同步 MR（`main/master → pre`）通过 | 研发 |
+| **MR approved** | 上线 MR（`pre` → `main`）通过 | 研发 |
+| **MR approved** | 热修同步 MR（`main/master` → `pre`）通过 | 研发 |
 | **Note** | Issue 评论含 `product:pass/reject` | 研发 |
 | **Note** | Issue 评论含 `developer:pass/reject` | 产品 |
 | **Note** | 普通 Issue 评论 | 研发（排除评论人自己） |
@@ -46,15 +46,26 @@ Issue 类型根据 description 中的模板章节自动识别，无需标题前�
 |---------|---------|---------|
 | 直接 push 受保护分支 | push 到 `main`/`master`/`pre` | 操作人 + TL |
 | 强制推送（Force Push） | `push_force: true`，任意分支 | 操作人 + TL |
-| 功能分支直合 main | `issue_*` → `main`/`master` 的 MR | 操作人 + TL |
+| 功能分支直合 main | `issue_*` → `main`/`master` 的 MR，跳过 pre 验收 | 操作人 + TL |
 | 上线 MR 验收未完成 | `pre` → `main` MR 创建时实时查 GitLab，有 Issue 未完成 `product:pass` + `developer:pass` | 操作人 + TL |
 | Issue 无人认领即关闭 | Issue 关闭时 assignees 为空 | TL |
 | Issue 负责人被全部移除 | Issue update 时 assignees 由有变无 | TL |
-| MR 缺少 Issue 关联 | `issue_*`/`hotfix_*` MR 描述无 `Closes #xxx`，未通过 `ccg mr create` | 操作人 + TL |
+| MR 缺少 Issue 关联 | `issue_*`/`hotfix_*` MR 描述无 `Closes #xxx`，未通过 `ccg mr create` 创建 | 操作人 + TL |
 | MR 标题不符规范 | `issue_*` MR 标题不以 `[需求]` 开头，或 `hotfix_*` 不以 `[Bug热修]` 开头 | 操作人 + TL |
 | Issue 未验收即关闭 | 需求/优化 Issue 关闭时查 GitLab API，无 `product:pass` 记录 | 操作人 + TL |
-| MR 审批不足即合并 | `issue_*`/`hotfix_*` MR 合并时查 GitLab API，Approve 数不足（hotfix→main 需 N 人，其余 1 人，绕过 `ccg mr merge`） | 操作人 + TL |
-| 热修未及时同步 pre | 热修 MR 合入 `main` 超过配置时长（默认 4 小时）未创建 `main → pre` 同步 MR | TL |
+| MR 审批不足即合并 | `issue_*`/`hotfix_*` MR 合并时查 GitLab API，Approve 不足（`hotfix_*` → `main` 需 N 人，其余需 1 人） | 操作人 + TL |
+| 热修未及时同步 pre | 热修 MR 合入 `main` 后超过 `hotfix_sync_threshold_hours`（默认 4 小时）未同步到 `pre` | TL |
+
+### 热修双路径
+
+热修分支（`hotfix_*`）支持两种合并路径，由研发在执行 `ccg gitlab mr create` 时选择：
+
+| 路径 | 目标分支 | 适用场景 | 所需 Approve |
+|------|---------|---------|------------|
+| **紧急路径** | `main`（默认） | 必须立即上线 | `hotfix_required_approvals`（默认 2） |
+| **非紧急路径** | `pre` | 不着急，随下次正常发布一起上线 | 1 |
+
+非紧急路径合入 `pre` 后，后续走正常上线流程（`pre` → `main`）。合入 `main` 的热修需在配置时限内完成 `main → pre` 同步，否则触发超时告警。
 
 ## 快速开始
 
@@ -85,7 +96,7 @@ http://<your-server>:<port>/gitlab/webhook
 | GET | `/health` | 健康检查 |
 | POST | `/gitlab/webhook` | GitLab Webhook 接收 |
 | GET | `/violations` | 查询违规记录（用于日报） |
-| GET | `/check-hotfix-sync` | 检查热修超时未同步 pre，发送企微告警并写入违规记录 |
+| GET | `/check-hotfix-sync` | 手动触发热修同步超时检查（服务内部会自动定时执行） |
 
 ### 违规记录查询
 
@@ -117,34 +128,9 @@ GET /violations?start=2026-05-01&end=2026-05-16
 
 ### 热修同步超时检查
 
-服务启动后自动在后台每隔 `hotfix_sync_check_interval_seconds`（默认 3600 秒）执行一次：检查所有热修 MR 合入 `main` 后是否在 `hotfix_sync_threshold_hours`（默认 4 小时）内完成了 `main → pre` 同步。超时的项目会收到企微告警并写入 `hotfix_sync_overdue` 违规记录。
+服务启动后在后台按 `hotfix_sync_check_interval_seconds`（默认 3600 秒）自动循环检查：热修 MR 合入 `main` 后是否在 `hotfix_sync_threshold_hours`（默认 4 小时）内完成了 `main → pre` 同步。超时的项目会收到企微告警并写入 `hotfix_sync_overdue` 违规记录。
 
-以下接口可手动触发（用于调试或补跑）：
-
-```
-GET /check-hotfix-sync
-```
-
-返回格式：
-
-```json
-{
-  "total": 1,
-  "items": [
-    {
-      "id": 3,
-      "created_at": "2026-05-16 10:00:00",
-      "project_id": 42,
-      "project": "ai-tool",
-      "mr_iid": 88,
-      "mr_title": "[Bug热修] #123 修复登录失败",
-      "mr_url": "https://gitlab.example.com/...",
-      "operator": "wujing03",
-      "operator_name": "邬晶"
-    }
-  ]
-}
-```
+`/check-hotfix-sync` 接口用于手动触发（调试或补跑），返回本次告警的记录列表。
 
 ## 配置说明
 
@@ -154,10 +140,10 @@ GET /check-hotfix-sync
 |-----------------|------------|------|
 | `wechat.webhook_url` | `WECHAT_WEBHOOK_URL` | 企业微信群机器人 Webhook URL |
 | `gitlab.secret_token` | `GITLAB_WEBHOOK_SECRET` | GitLab Webhook Secret Token（可选） |
-| `gitlab.url` | `GITLAB_URL` | GitLab 地址，用于主动查询 API（如上线验收检查） |
+| `gitlab.url` | `GITLAB_URL` | GitLab 地址，用于主动查询 API |
 | `gitlab.token` | `GITLAB_PRIVATE_TOKEN` | GitLab Personal Access Token，需 `api` 权限 |
-| `tl_usernames` | `TL_USERNAMES=user1,user2` | TL / Reviewer 的 GitLab 用户名，违规告警及热修场景额外 @ |
-| `hotfix_required_approvals` | `HOTFIX_REQUIRED_APPROVALS` | 热修 MR（→ `main` 紧急路径）所需最少 Approve 人数，默认 2；→ `pre` 非紧急路径固定为 1 |
+| `tl_usernames` | `TL_USERNAMES=user1,user2` | TL / Reviewer 的 GitLab 用户名，违规告警及热修紧急路径额外 @ |
+| `hotfix_required_approvals` | `HOTFIX_REQUIRED_APPROVALS` | 热修紧急路径（→ `main`）所需最少 Approve 人数，默认 2；非紧急路径（→ `pre`）固定为 1 |
 | `hotfix_sync_threshold_hours` | `HOTFIX_SYNC_THRESHOLD_HOURS` | 热修合入 `main` 后超过此小时数未同步 `pre` 则告警，默认 4 |
 | `hotfix_sync_check_interval_seconds` | `HOTFIX_SYNC_CHECK_INTERVAL` | 内部定时检查热修同步状态的间隔秒数，默认 3600（1 小时） |
 | `user_map.<username>` | `WECHAT_USER_<username>=<mobile>` | GitLab 用户名 → 企业微信手机号映射 |
@@ -169,7 +155,7 @@ GET /check-hotfix-sync
 
 ```bash
 bash service.sh start    # 启动
-bash service.sh stop     # 停止
+bash service.sh stop     # 停止（SIGTERM 优雅关闭，等待 10s）
 bash service.sh restart  # 重启
 bash service.sh status   # 查看状态
 ```
@@ -186,8 +172,8 @@ bash service.sh status   # 查看状态
 
 | Webhook 事件 | 覆盖功能 |
 |-------------|---------|
-| `Issues events` | Issue 创建/重开通知、格式校验（含 assignee）、assignee 变更通知、Issue 关闭违规（无人认领、产品未验收、负责人全部移除） |
-| `Merge request events` | MR 创建违规检测（缺 Closes #xxx、标题不规范、分支目标错误、pre 验收未完成）、MR Approve 通知、MR 合并违规检测（Approve 不足） |
+| `Issues events` | Issue 创建/重开通知、格式校验（含 assignee）、assignee 变更通知、Issue 关闭违规（无人认领、未产品验收、负责人全部移除） |
+| `Merge request events` | MR 创建违规检测（缺 `Closes #xxx`、标题不规范、功能分支直合 main、pre 验收未完成）、MR Approve 通知、MR 合并违规检测（Approve 不足） |
 | `Comments` | Issue 评论中 `product:pass/reject`、`developer:pass/reject` 验收口令自动通知；普通评论转发给 assignee |
 | `Push events` | 直接 push 受保护分支告警、Force Push 告警 |
 
@@ -204,15 +190,15 @@ bash service.sh status   # 查看状态
 
 ```
 app/
-├── main.py            # FastAPI 应用入口及请求日志中间件
-├── webhook.py         # Webhook 路由，校验 GitLab Secret，提供违规查询接口
-├── handlers.py        # 业务处理：Issue / MR / Note / Push 事件
+├── main.py            # FastAPI 应用入口、请求日志中间件、热修同步后台定时任务
+├── webhook.py         # Webhook 路由：校验 Token、分发事件、违规查询、手动触发热修检查
+├── handlers.py        # 业务逻辑：Issue / MR / Note / Push 事件处理 + 热修同步检查函数
 ├── config.py          # 配置加载（config.yaml + 环境变量），初始化 GitLabClient
 ├── gitlab_client.py   # GitLab API 客户端（Issue / Note / MR 查询）
 ├── wechat.py          # 企业微信 Webhook 发送
-├── state.py           # SQLite 持久化：违规记录读写
+├── state.py           # SQLite 持久化：violations 违规记录 + hotfix_sync_pending 待同步记录
 └── logger.py          # 结构化日志
-service.sh             # 进程管理脚本（start/stop/restart/status）
+service.sh             # 进程管理脚本（start/stop/restart/status，优雅关闭）
 requirements.txt       # Python 依赖
 config.yaml.example    # 配置模板
 ```
