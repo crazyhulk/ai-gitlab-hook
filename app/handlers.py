@@ -13,11 +13,24 @@ logger = get_logger(__name__)
 # ──────────────────────────────────────────────────────────────
 
 _FEATURE_SECTIONS = ["需求背景", "功能详细描述", "验收标准", "优先级"]
+_IMPROVE_SECTIONS = ["优化背景", "现状问题", "优化方案", "预期收益", "优先级"]
 _BUG_SECTIONS = ["问题现象", "复现步骤", "预期正常结果", "实际异常结果", "出现环境", "严重等级"]
 
 
 def _missing_sections(body: str, sections: list[str]) -> list[str]:
     return [s for s in sections if not re.search(rf"##\s*{re.escape(s)}", body or "")]
+
+
+def _detect_issue_type(description: str) -> str | None:
+    """根据 description 中的唯一标识章节推断 issue 类型。"""
+    body = description or ""
+    if re.search(r"##\s*优化背景", body):
+        return "improve"
+    if re.search(r"##\s*需求背景", body):
+        return "feature"
+    if re.search(r"##\s*问题现象", body):
+        return "bug"
+    return None
 
 
 # ──────────────────────────────────────────────────────────────
@@ -31,6 +44,13 @@ def _missing_sections(body: str, sections: list[str]) -> list[str]:
 def handle_issue_event(payload: dict[str, Any], config: Config) -> str:
     attrs = payload.get("object_attributes", {}) or {}
     action = attrs.get("action", "")
+    if not action:
+        state = attrs.get("state", "")
+        changes = payload.get("changes") or {}
+        if state == "opened":
+            action = "update" if changes else "open"
+        elif state in ("closed", "reopened"):
+            action = state
     issue_iid = attrs.get("iid")
     issue_title = attrs.get("title", "")
     issue_url = attrs.get("url", "")
@@ -47,12 +67,13 @@ def handle_issue_event(payload: dict[str, Any], config: Config) -> str:
     assignee_names = [a.get("name", "") for a in assignees if a.get("name")]
     assignee_usernames = [a.get("username", "") for a in assignees if a.get("username")]
 
-    is_feature = issue_title.startswith("【需求】")
-    is_bug = issue_title.startswith("【Bug】") or issue_title.startswith("【bug】")
+    issue_type = _detect_issue_type(description)
+    is_feature = issue_type in ("feature", "improve")
+    is_bug = issue_type == "bug"
 
     logger.info(
-        "Issue event action=%s issue=#%s title=%r project=%s reporter=%s assignees=%s",
-        action, issue_iid, issue_title, project_name, reporter_username, assignee_usernames,
+        "Issue event action=%s issue=#%s type=%s title=%r project=%s reporter=%s assignees=%s",
+        action, issue_iid, issue_type, issue_title, project_name, reporter_username, assignee_usernames,
     )
 
     if action == "open":
@@ -60,13 +81,14 @@ def handle_issue_event(payload: dict[str, Any], config: Config) -> str:
             return _on_feature_issue_open(
                 config, issue_iid, issue_title, issue_url, description,
                 reporter_name, reporter_username, assignee_names, assignee_usernames,
+                issue_type=issue_type,
             )
         if is_bug:
             return _on_bug_issue_open(
                 config, issue_iid, issue_title, issue_url, description,
                 reporter_name, reporter_username, assignee_names, assignee_usernames,
             )
-        logger.info("Issue #%s has no workflow prefix, skipping", issue_iid)
+        logger.info("Issue #%s type not detected from description, skipping", issue_iid)
         return "ignored"
 
     if action == "update":
@@ -75,6 +97,7 @@ def handle_issue_event(payload: dict[str, Any], config: Config) -> str:
                 config, issue_iid, issue_title, issue_url, description,
                 reporter_name, reporter_username, assignee_names, assignee_usernames,
                 is_bug=is_bug,
+                issue_type=issue_type,
             )
         return "ignored"
 
@@ -86,14 +109,16 @@ def _on_feature_issue_open(
     config: Config,
     issue_iid, issue_title, issue_url, description,
     reporter_name, reporter_username, assignee_names, assignee_usernames,
+    issue_type: str = "feature",
 ) -> str:
-    missing = _missing_sections(description, _FEATURE_SECTIONS)
+    sections = _IMPROVE_SECTIONS if issue_type == "improve" else _FEATURE_SECTIONS
+    type_label = "优化" if issue_type == "improve" else "需求"
+    missing = _missing_sections(description, sections)
     if missing:
-        # 格式不合规 → 通知产品补充，记录到状态机
         state.mark_issue_invalid(int(issue_iid))
         missing_str = "、".join(missing)
         content = (
-            f"### 需求 Issue 格式不合规\n"
+            f"### {type_label} Issue 格式不合规\n"
             f"> **Issue #{issue_iid}**：{issue_title}\n"
             f"> **提出人**：{reporter_name}\n"
             f"> [查看 Issue]({issue_url})\n\n"
@@ -104,24 +129,24 @@ def _on_feature_issue_open(
             f"> 补充完成后研发即可执行：`ccg gitlab feature start {issue_iid}`"
         )
         at_mobiles = config.resolve_wechat_ids([reporter_username])
-        logger.info("Feature issue #%s invalid missing=%s, notifying reporter=%s", issue_iid, missing, reporter_username)
+        logger.info("Feature/improve issue #%s invalid missing=%s, notifying reporter=%s", issue_iid, missing, reporter_username)
         send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
         return "ok"
 
     # 格式合规 → 通知研发认领
     assignee_str = "、".join(assignee_names) if assignee_names else "（待指派）"
     content = (
-        f"### 新需求 Issue 待认领\n"
+        f"### 新{type_label} Issue 待认领\n"
         f"> **Issue #{issue_iid}**：{issue_title}\n"
         f"> **提出人**：{reporter_name}\n"
         f"> **负责人**：{assignee_str}\n"
         f"> [查看 Issue]({issue_url})\n\n"
         f"**下一步 · {assignee_str or '研发'}**\n"
-        f"> 请阅读需求后执行以下命令认领并拉取功能分支：\n"
+        f"> 请阅读{type_label}后执行以下命令认领并拉取功能分支：\n"
         f"> `ccg gitlab feature start {issue_iid}`"
     )
     at_mobiles = config.resolve_wechat_ids(assignee_usernames)
-    logger.info("Feature issue #%s created, notifying assignees=%s", issue_iid, assignee_usernames)
+    logger.info("Feature/improve issue #%s created, notifying assignees=%s", issue_iid, assignee_usernames)
     send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
     return "ok"
 
@@ -175,26 +200,30 @@ def _on_issue_update(
     issue_iid, issue_title, issue_url, description,
     reporter_name, reporter_username, assignee_names, assignee_usernames,
     is_bug: bool,
+    issue_type: str | None = None,
 ) -> str:
     if not state.is_issue_known_invalid(int(issue_iid)):
-        # 之前未记录为不合规，忽略（避免每次更新都发通知）
         logger.info("Issue #%s updated but not previously marked invalid, skipping", issue_iid)
         return "ignored"
 
-    sections = _BUG_SECTIONS if is_bug else _FEATURE_SECTIONS
+    if is_bug:
+        sections = _BUG_SECTIONS
+    elif issue_type == "improve":
+        sections = _IMPROVE_SECTIONS
+    else:
+        sections = _FEATURE_SECTIONS
     missing = _missing_sections(description, sections)
     if missing:
-        # 补充后仍不合规，继续等待
         logger.info("Issue #%s updated but still invalid missing=%s, no notification", issue_iid, missing)
         return "ignored"
 
     # 从不合规变为合规 → 通知研发重新认领
     state.mark_issue_valid(int(issue_iid))
     cmd = f"ccg gitlab hotfix start {issue_iid}" if is_bug else f"ccg gitlab feature start {issue_iid}"
-    issue_type = "Bug" if is_bug else "需求"
+    type_label = "Bug" if is_bug else ("优化" if issue_type == "improve" else "需求")
     assignee_str = "、".join(assignee_names) if assignee_names else "（待指派）"
     content = (
-        f"### {issue_type} Issue 格式已补全，可以认领\n"
+        f"### {type_label} Issue 格式已补全，可以认领\n"
         f"> **Issue #{issue_iid}**：{issue_title}\n"
         f"> **提出人**：{reporter_name}\n"
         f"> **负责人**：{assignee_str}\n"
@@ -528,6 +557,59 @@ def _handle_verdict_comment(
     logger.info(
         "Verdict note issue=#%s role=%s verdict=%s commenter=%s at_mobiles=%s",
         issue_iid, role, verdict, commenter_username, at_mobiles,
+    )
+    send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
+    return "ok"
+
+
+# ──────────────────────────────────────────────────────────────
+# Push Hook
+# 告警节点：有人直接 push 到受保护分支（main / master / pre），绕过 MR 审批流程
+# ──────────────────────────────────────────────────────────────
+
+_PROTECTED_BRANCHES = {"main", "master", "pre"}
+
+
+def handle_push_event(payload: dict[str, Any], config: Config) -> str:
+    ref: str = payload.get("ref", "")
+    branch = ref.removeprefix("refs/heads/")
+
+    if branch not in _PROTECTED_BRANCHES:
+        logger.info("Push to non-protected branch=%s, ignored", branch)
+        return "ignored"
+
+    pusher_name = payload.get("user_name", "")
+    pusher_username = payload.get("user_username", "")
+    project = payload.get("project", {}) or {}
+    project_name = project.get("name", "")
+    project_url = project.get("web_url", "")
+    commits: list[dict] = payload.get("commits") or []
+    total = payload.get("total_commits_count", len(commits))
+
+    commit_lines = ""
+    for c in commits[:5]:
+        title = (c.get("message") or "").splitlines()[0][:80]
+        commit_lines += f"> - [{title}]({c.get('url', '')})\n"
+    if total > 5:
+        commit_lines += f"> - ...共 {total} 个提交\n"
+
+    content = (
+        f"### ⚠️ 直接 Push 到受保护分支\n"
+        f"> **项目**：{project_name}\n"
+        f"> **分支**：`{branch}`\n"
+        f"> **操作人**：{pusher_name}（`{pusher_username}`）\n"
+        f"> **提交数**：{total}\n"
+        f"{commit_lines}"
+        f"> [查看项目]({project_url})\n\n"
+        f"**注意**：`{branch}` 为受保护分支，应通过 MR 合并，请确认此次推送是否符合规范。"
+    )
+
+    at_mobiles = config.tl_mobiles + config.resolve_wechat_ids([pusher_username])
+    at_mobiles = list(dict.fromkeys(at_mobiles))
+
+    logger.info(
+        "Push to protected branch=%s pusher=%s commits=%s project=%s",
+        branch, pusher_username, total, project_name,
     )
     send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
     return "ok"

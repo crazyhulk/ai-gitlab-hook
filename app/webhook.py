@@ -3,7 +3,7 @@ from typing import Any
 from fastapi import APIRouter, Header, HTTPException, Request
 
 from . import state
-from .handlers import handle_issue_event, handle_mr_event, handle_note_event
+from .handlers import handle_issue_event, handle_mr_event, handle_note_event, handle_push_event
 from .logger import get_logger
 
 logger = get_logger(__name__)
@@ -38,6 +38,8 @@ async def gitlab_webhook(
         result = handle_mr_event(payload, config)
     elif x_gitlab_event == "Note Hook":
         result = handle_note_event(payload, config)
+    elif x_gitlab_event == "Push Hook":
+        result = handle_push_event(payload, config)
     else:
         logger.info("Unhandled event type=%s, ignored", x_gitlab_event)
         result = "ignored"
