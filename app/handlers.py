@@ -390,7 +390,6 @@ def _on_issue_update(
 #   节点5 — 热修 MR Approve 后，Reviewer 通知研发可合并
 # 违规检测：
 #   - 功能分支（issue_*）直接合入 main/master，绕过 pre
-#   - 热修分支（hotfix_*）目标分支为 pre 而非 main/master
 #   - 上线 MR 创建时 pre 双向验收未完成
 # ──────────────────────────────────────────────────────────────
 
@@ -434,28 +433,6 @@ def _on_mr_open(
             operator=author_username, operator_name=author_name,
             violation_type="mr_feature_to_main",
             description=f"MR !{mr_iid}「{mr_title}」功能分支 {source_branch} 直接合入 {target_branch}",
-            project=project_name,
-            detail={"mr_iid": mr_iid, "source_branch": source_branch, "target_branch": target_branch, "mr_url": mr_url},
-        )
-        send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
-        violations_found = True
-
-    # 热修分支目标分支错误（应合 main，却合 pre）
-    if source_branch.startswith("hotfix_") and target_branch == "pre":
-        content = (
-            f"### ⚠️ 热修分支目标分支错误\n"
-            f"> **MR !{mr_iid}**：{mr_title}\n"
-            f"> **操作人**：{author_name}（`{author_username}`）\n"
-            f"> `{source_branch}` → `{target_branch}`（应为 `main`/`master`）\n"
-            f"> [查看 MR]({mr_url})\n\n"
-            f"**注意**：热修分支应直接合入 `main`/`master` 上线，请修改 MR 目标分支。"
-        )
-        at_mobiles = list(dict.fromkeys(config.tl_mobiles + config.resolve_wechat_ids([author_username])))
-        logger.warning("MR !%s hotfix branch targeting pre author=%s project=%s", mr_iid, author_username, project_name)
-        state.record_violation(
-            operator=author_username, operator_name=author_name,
-            violation_type="mr_hotfix_wrong_target",
-            description=f"MR !{mr_iid}「{mr_title}」热修分支 {source_branch} 目标为 pre 而非 main",
             project=project_name,
             detail={"mr_iid": mr_iid, "source_branch": source_branch, "target_branch": target_branch, "mr_url": mr_url},
         )
@@ -559,6 +536,23 @@ def _on_mr_merged(
     config: Config,
 ) -> str:
     source_branch: str = attrs.get("source_branch", "")
+    target_branch: str = attrs.get("target_branch", "")
+
+    project = payload.get("project", {}) or {}
+    project_id = project.get("id")
+    project_name = project.get("name", "")
+
+    # main/master → pre 热修同步完成，清除待同步记录
+    if source_branch in _MAIN_BRANCHES and target_branch == "pre":
+        if project_id:
+            cleared = state.clear_hotfix_sync_pending(project_id)
+            if cleared:
+                logger.info(
+                    "Cleared %s hotfix_sync_pending records after main→pre sync project=%s",
+                    cleared, project_name,
+                )
+        return "ignored"
+
     if not source_branch.startswith(("issue_", "hotfix_")):
         return "ignored"
 
@@ -569,51 +563,59 @@ def _on_mr_merged(
     mr_iid = attrs.get("iid", "?")
     mr_title = attrs.get("title", "")
     mr_url = attrs.get("url", "")
-    target_branch: str = attrs.get("target_branch", "")
 
     user = payload.get("user", {}) or {}
     author_name = user.get("name", "")
     author_username = user.get("username", "")
 
-    project = payload.get("project", {}) or {}
-    project_id = project.get("id")
-    project_name = project.get("name", "")
-
-    required = config.hotfix_required_approvals if source_branch.startswith("hotfix_") else 1
+    is_hotfix_to_main = source_branch.startswith("hotfix_") and target_branch in _MAIN_BRANCHES
+    required = config.hotfix_required_approvals if is_hotfix_to_main else 1
 
     approvals = config.gitlab_client.get_mr_approvals(project_id, mr_iid)
     approved_count = len(approvals.get("approved_by") or [])
 
-    if approved_count >= required:
-        logger.info("MR !%s merged with sufficient approval %s/%s", mr_iid, approved_count, required)
-        return "ignored"
+    if approved_count < required:
+        type_label = "热修" if source_branch.startswith("hotfix_") else "需求"
+        content = (
+            f"### ⚠️ {type_label} MR 审批不足即合并（绕过 ccg 门禁）\n"
+            f"> **MR !{mr_iid}**：{mr_title}\n"
+            f"> **操作人**：{author_name}（`{author_username}`）\n"
+            f"> `{source_branch}` → `{target_branch}`\n"
+            f"> **审批状态**：{approved_count}/{required} 人 Approve\n"
+            f"> [查看 MR]({mr_url})\n\n"
+            f"**注意**：{type_label} MR 需要 {required} 人 Approve 才允许合并，"
+            f"此次合并可能直接在 GitLab 页面操作，绕过了 `ccg gitlab mr merge` 门禁检查。"
+        )
+        at_mobiles = list(dict.fromkeys(config.tl_mobiles + config.resolve_wechat_ids([author_username])))
+        logger.warning(
+            "MR !%s merged without sufficient approval %s/%s author=%s project=%s",
+            mr_iid, approved_count, required, author_username, project_name,
+        )
+        state.record_violation(
+            operator=author_username, operator_name=author_name,
+            violation_type="mr_merged_without_approval",
+            description=f"MR !{mr_iid}「{mr_title}」审批不足即合并（{approved_count}/{required}），可能绕过 ccg 门禁",
+            project=project_name,
+            detail={"mr_iid": mr_iid, "approved_count": approved_count, "required": required,
+                    "source_branch": source_branch, "mr_url": mr_url},
+        )
+        send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
+        return "ok"
 
-    type_label = "热修" if source_branch.startswith("hotfix_") else "需求"
-    content = (
-        f"### ⚠️ {type_label} MR 审批不足即合并（绕过 ccg 门禁）\n"
-        f"> **MR !{mr_iid}**：{mr_title}\n"
-        f"> **操作人**：{author_name}（`{author_username}`）\n"
-        f"> `{source_branch}` → `{target_branch}`\n"
-        f"> **审批状态**：{approved_count}/{required} 人 Approve\n"
-        f"> [查看 MR]({mr_url})\n\n"
-        f"**注意**：{type_label} MR 需要 {required} 人 Approve 才允许合并，"
-        f"此次合并可能直接在 GitLab 页面操作，绕过了 `ccg gitlab mr merge` 门禁检查。"
-    )
-    at_mobiles = list(dict.fromkeys(config.tl_mobiles + config.resolve_wechat_ids([author_username])))
-    logger.warning(
-        "MR !%s merged without sufficient approval %s/%s author=%s project=%s",
-        mr_iid, approved_count, required, author_username, project_name,
-    )
-    state.record_violation(
-        operator=author_username, operator_name=author_name,
-        violation_type="mr_merged_without_approval",
-        description=f"MR !{mr_iid}「{mr_title}」审批不足即合并（{approved_count}/{required}），可能绕过 ccg 门禁",
-        project=project_name,
-        detail={"mr_iid": mr_iid, "approved_count": approved_count, "required": required,
-                "source_branch": source_branch, "mr_url": mr_url},
-    )
-    send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
-    return "ok"
+    # 热修合入 main：记录待同步 pre，后续通过 /check-hotfix-sync 定期检查是否超时
+    if is_hotfix_to_main and project_id:
+        state.record_hotfix_sync_pending(
+            project_id=project_id,
+            project=project_name,
+            mr_iid=mr_iid,
+            mr_title=mr_title,
+            mr_url=mr_url,
+            operator=author_username,
+            operator_name=author_name,
+        )
+        logger.info("Recorded hotfix_sync_pending MR !%s project=%s", mr_iid, project_name)
+
+    return "ignored"
 
 
 def handle_mr_event(payload: dict[str, Any], config: Config) -> str:
@@ -680,21 +682,34 @@ def handle_mr_event(payload: dict[str, Any], config: Config) -> str:
         )
 
     elif is_hotfix:
-        required = config.hotfix_required_approvals
-        content = (
-            f"### 🚨 热修 MR 获得新 Approve\n"
-            f"> **MR !{mr_iid}**：{mr_title}\n"
-            f"> **审批人**：{approver_name}\n"
-            f"> **合并目标**：`{target_branch}`（直接上线）\n"
-            f"> [查看 MR]({mr_url})\n\n"
-            f"**下一步 · {developer_label}**\n"
-            f"> 热修 MR 需要 **{required} 人** Approve，先确认当前人数是否满足：\n"
-            f"> `ccg gitlab mr check {mr_iid}`\n"
-            f"> 满足后执行：\n"
-            f"> `ccg gitlab mr merge {mr_iid}`"
-        )
-        # 热修额外 @ TL
-        at_mobiles = list(dict.fromkeys(at_mobiles + config.tl_mobiles))
+        if target_branch in _MAIN_BRANCHES:
+            # 紧急路径：直接上线，需多人审批，额外 @ TL
+            required = config.hotfix_required_approvals
+            content = (
+                f"### 🚨 热修 MR 获得新 Approve\n"
+                f"> **MR !{mr_iid}**：{mr_title}\n"
+                f"> **审批人**：{approver_name}\n"
+                f"> **合并目标**：`{target_branch}`（直接上线）\n"
+                f"> [查看 MR]({mr_url})\n\n"
+                f"**下一步 · {developer_label}**\n"
+                f"> 热修 MR 需要 **{required} 人** Approve，先确认当前人数是否满足：\n"
+                f"> `ccg gitlab mr check {mr_iid}`\n"
+                f"> 满足后执行：\n"
+                f"> `ccg gitlab mr merge {mr_iid}`"
+            )
+            at_mobiles = list(dict.fromkeys(at_mobiles + config.tl_mobiles))
+        else:
+            # 非紧急路径：合入 pre，随下次上线一起发布，1 人审批即可
+            content = (
+                f"### 热修 MR 审批通过 ✓\n"
+                f"> **MR !{mr_iid}**：{mr_title}\n"
+                f"> **审批人**：{approver_name}\n"
+                f"> **合并目标**：`{target_branch}`（随下次上线发布）\n"
+                f"> [查看 MR]({mr_url})\n\n"
+                f"**下一步 · {developer_label}**\n"
+                f"> 审批已通过，执行以下命令合并到 `{target_branch}`：\n"
+                f"> `ccg gitlab mr merge {mr_iid}`"
+            )
 
     elif is_release:
         content = (

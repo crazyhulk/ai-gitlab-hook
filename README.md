@@ -17,7 +17,8 @@ GitLab Webhook 接收服务，将 GitLab 事件转化为企业微信群消息，
 | **Issue update** | 新增 assignee（需求/优化/Bug） | 新增的研发（assignee） |
 | **Issue update** | description 变更前不合规、变更后合规且已有 assignee | 研发（assignee） |
 | **MR approved** | 需求 MR（`issue_*` 分支）通过 | 研发 |
-| **MR approved** | 热修 MR（`hotfix_*` 分支）通过 | 研发 + TL |
+| **MR approved** | 热修 MR（`hotfix_*` → `main`，紧急路径）通过 | 研发 + TL |
+| **MR approved** | 热修 MR（`hotfix_*` → `pre`，非紧急路径）通过 | 研发 |
 | **MR approved** | 上线 MR（`pre` 分支）通过 | 研发 |
 | **MR approved** | 热修同步 MR（`main/master → pre`）通过 | 研发 |
 | **Note** | Issue 评论含 `product:pass/reject` | 研发 |
@@ -46,14 +47,14 @@ Issue 类型根据 description 中的模板章节自动识别，无需标题前�
 | 直接 push 受保护分支 | push 到 `main`/`master`/`pre` | 操作人 + TL |
 | 强制推送（Force Push） | `push_force: true`，任意分支 | 操作人 + TL |
 | 功能分支直合 main | `issue_*` → `main`/`master` 的 MR | 操作人 + TL |
-| 热修目标分支错误 | `hotfix_*` → `pre` 的 MR | 操作人 + TL |
 | 上线 MR 验收未完成 | `pre` → `main` MR 创建时实时查 GitLab，有 Issue 未完成 `product:pass` + `developer:pass` | 操作人 + TL |
 | Issue 无人认领即关闭 | Issue 关闭时 assignees 为空 | TL |
 | Issue 负责人被全部移除 | Issue update 时 assignees 由有变无 | TL |
 | MR 缺少 Issue 关联 | `issue_*`/`hotfix_*` MR 描述无 `Closes #xxx`，未通过 `ccg mr create` | 操作人 + TL |
 | MR 标题不符规范 | `issue_*` MR 标题不以 `[需求]` 开头，或 `hotfix_*` 不以 `[Bug热修]` 开头 | 操作人 + TL |
 | Issue 未验收即关闭 | 需求/优化 Issue 关闭时查 GitLab API，无 `product:pass` 记录 | 操作人 + TL |
-| MR 审批不足即合并 | `issue_*`/`hotfix_*` MR 合并时查 GitLab API，Approve 数不足要求（绕过 `ccg mr merge`） | 操作人 + TL |
+| MR 审批不足即合并 | `issue_*`/`hotfix_*` MR 合并时查 GitLab API，Approve 数不足（hotfix→main 需 N 人，其余 1 人，绕过 `ccg mr merge`） | 操作人 + TL |
+| 热修未及时同步 pre | 热修 MR 合入 `main` 超过配置时长（默认 4 小时）未创建 `main → pre` 同步 MR | TL |
 
 ## 快速开始
 
@@ -84,6 +85,7 @@ http://<your-server>:<port>/gitlab/webhook
 | GET | `/health` | 健康检查 |
 | POST | `/gitlab/webhook` | GitLab Webhook 接收 |
 | GET | `/violations` | 查询违规记录（用于日报） |
+| GET | `/check-hotfix-sync` | 检查热修超时未同步 pre，发送企微告警并写入违规记录 |
 
 ### 违规记录查询
 
@@ -113,6 +115,41 @@ GET /violations?start=2026-05-01&end=2026-05-16
 
 `start` / `end` 默认为当天，格式 `YYYY-MM-DD`。
 
+### 热修同步超时检查
+
+```
+GET /check-hotfix-sync
+```
+
+检查所有热修 MR 合入 `main` 后是否在配置时限内创建了 `main → pre` 同步 MR。超时未同步的项目会收到企微告警，并写入 `hotfix_sync_overdue` 违规记录。
+
+**建议通过 cron 每隔 1–2 小时调用一次**，例如：
+
+```bash
+*/60 * * * * curl -sf http://localhost:8021/check-hotfix-sync
+```
+
+返回格式：
+
+```json
+{
+  "total": 1,
+  "items": [
+    {
+      "id": 3,
+      "created_at": "2026-05-16 10:00:00",
+      "project_id": 42,
+      "project": "ai-tool",
+      "mr_iid": 88,
+      "mr_title": "[Bug热修] #123 修复登录失败",
+      "mr_url": "https://gitlab.example.com/...",
+      "operator": "wujing03",
+      "operator_name": "邬晶"
+    }
+  ]
+}
+```
+
 ## 配置说明
 
 配置优先级：**环境变量 > config.yaml**
@@ -124,7 +161,8 @@ GET /violations?start=2026-05-01&end=2026-05-16
 | `gitlab.url` | `GITLAB_URL` | GitLab 地址，用于主动查询 API（如上线验收检查） |
 | `gitlab.token` | `GITLAB_PRIVATE_TOKEN` | GitLab Personal Access Token，需 `api` 权限 |
 | `tl_usernames` | `TL_USERNAMES=user1,user2` | TL / Reviewer 的 GitLab 用户名，违规告警及热修场景额外 @ |
-| `hotfix_required_approvals` | `HOTFIX_REQUIRED_APPROVALS` | 热修 MR 所需最少 Approve 人数，默认 2 |
+| `hotfix_required_approvals` | `HOTFIX_REQUIRED_APPROVALS` | 热修 MR（→ `main` 紧急路径）所需最少 Approve 人数，默认 2；→ `pre` 非紧急路径固定为 1 |
+| `hotfix_sync_threshold_hours` | `HOTFIX_SYNC_THRESHOLD_HOURS` | 热修合入 `main` 后超过此小时数未同步 `pre` 则告警，默认 4 |
 | `user_map.<username>` | `WECHAT_USER_<username>=<mobile>` | GitLab 用户名 → 企业微信手机号映射 |
 | `log.level` | `LOG_LEVEL` | 日志级别：`DEBUG` / `INFO` / `WARNING` / `ERROR` |
 

@@ -46,8 +46,10 @@ class Config:
     user_map: dict[str, str] = field(default_factory=dict)
     # Reviewer / TL 的 GitLab 用户名列表，用于热修/上线时额外 @ 通知
     tl_usernames: list[str] = field(default_factory=list)
-    # 热修 MR 所需最少 Approve 人数（需求 MR 固定为 1）
+    # 热修 MR 所需最少 Approve 人数（需求 MR 固定为 1；hotfix→pre 固定为 1）
     hotfix_required_approvals: int = 2
+    # hotfix 合入 main 后，超过此小时数未同步 pre 则触发告警
+    hotfix_sync_threshold_hours: int = 4
     # 由 __post_init__ 按 gitlab.url/token 自动初始化，无需手动设置
     gitlab_client: GitLabClient | None = field(default=None, init=False, repr=False)
 
@@ -109,6 +111,13 @@ def load_config(path: str = "config.yaml") -> Config:
         )
     )
 
+    hotfix_sync_threshold_hours = int(
+        os.environ.get(
+            "HOTFIX_SYNC_THRESHOLD_HOURS",
+            str(data.get("hotfix_sync_threshold_hours", 4)),
+        )
+    )
+
     return Config(
         server=ServerConfig(
             host=str(s.get("host", "0.0.0.0")),
@@ -134,4 +143,5 @@ def load_config(path: str = "config.yaml") -> Config:
         user_map=user_map,
         tl_usernames=tl_usernames,
         hotfix_required_approvals=hotfix_required_approvals,
+        hotfix_sync_threshold_hours=hotfix_sync_threshold_hours,
     )
