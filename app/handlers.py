@@ -95,17 +95,27 @@ def handle_issue_event(payload: dict[str, Any], config: Config) -> str:
 
     if action == "update":
         if is_feature or is_bug:
-            if "description" not in changes:
-                logger.info("Issue #%s updated but description unchanged, skipping", issue_iid)
-                return "ignored"
-            prev_description = (changes.get("description") or {}).get("previous", "") or ""
-            return _on_issue_update(
-                config, issue_iid, issue_title, issue_url, description,
-                reporter_name, reporter_username, assignee_names, assignee_usernames,
-                is_bug=is_bug,
-                issue_type=issue_type,
-                prev_description=prev_description,
-            )
+            notified = False
+            if "assignees" in changes:
+                new_assignees = _diff_assignees(changes["assignees"])
+                if new_assignees:
+                    _on_issue_assignee_change(
+                        config, issue_iid, issue_title, issue_url,
+                        reporter_name, new_assignees, is_bug=is_bug, issue_type=issue_type,
+                    )
+                    notified = True
+            if "description" in changes:
+                prev_description = (changes.get("description") or {}).get("previous", "") or ""
+                result = _on_issue_update(
+                    config, issue_iid, issue_title, issue_url, description,
+                    reporter_name, reporter_username, assignee_names, assignee_usernames,
+                    is_bug=is_bug,
+                    issue_type=issue_type,
+                    prev_description=prev_description,
+                )
+                if result == "ok":
+                    notified = True
+            return "ok" if notified else "ignored"
         return "ignored"
 
     if action == "close":
@@ -148,6 +158,8 @@ def _on_feature_issue_open(
     sections = _IMPROVE_SECTIONS if issue_type == "improve" else _FEATURE_SECTIONS
     type_label = "优化" if issue_type == "improve" else "需求"
     missing = _missing_sections(description, sections)
+    if not assignee_usernames:
+        missing.append("负责人（指派研发）")
     if missing:
         missing_str = "、".join(missing)
         content = (
@@ -190,6 +202,8 @@ def _on_bug_issue_open(
     reporter_name, reporter_username, assignee_names, assignee_usernames,
 ) -> str:
     missing = _missing_sections(description, _BUG_SECTIONS)
+    if not assignee_usernames:
+        missing.append("负责人（指派研发）")
     if missing:
         missing_str = "、".join(missing)
         content = (
@@ -227,6 +241,40 @@ def _on_bug_issue_open(
     return "ok"
 
 
+def _diff_assignees(assignees_change: dict) -> list[dict]:
+    """返回新增的 assignee 列表（current 中有、previous 中没有的）。"""
+    prev_ids = {a.get("id") for a in (assignees_change.get("previous") or [])}
+    return [a for a in (assignees_change.get("current") or []) if a.get("id") not in prev_ids]
+
+
+def _on_issue_assignee_change(
+    config: Config,
+    issue_iid, issue_title, issue_url,
+    reporter_name: str,
+    new_assignees: list[dict],
+    is_bug: bool,
+    issue_type: str | None,
+) -> None:
+    cmd = f"ccg gitlab hotfix start {issue_iid}" if is_bug else f"ccg gitlab feature start {issue_iid}"
+    type_label = "Bug" if is_bug else ("优化" if issue_type == "improve" else "需求")
+    assignee_names = [a.get("name", "") for a in new_assignees if a.get("name")]
+    assignee_usernames = [a.get("username", "") for a in new_assignees if a.get("username")]
+    assignee_str = "、".join(assignee_names)
+    content = (
+        f"### {type_label} Issue 已指派\n"
+        f"> **Issue #{issue_iid}**：{issue_title}\n"
+        f"> **提出人**：{reporter_name}\n"
+        f"> **负责人**：{assignee_str}\n"
+        f"> [查看 Issue]({issue_url})\n\n"
+        f"**下一步 · {assignee_str}**\n"
+        f"> 请阅读 Issue 后执行以下命令认领并拉取分支：\n"
+        f"> `{cmd}`"
+    )
+    at_mobiles = config.resolve_wechat_ids(assignee_usernames)
+    logger.info("Issue #%s assignee changed, notifying new assignees=%s", issue_iid, assignee_usernames)
+    send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
+
+
 def _on_issue_update(
     config: Config,
     issue_iid, issue_title, issue_url, description,
@@ -249,6 +297,10 @@ def _on_issue_update(
     missing = _missing_sections(description, sections)
     if missing:
         logger.info("Issue #%s updated but still invalid missing=%s, no notification", issue_iid, missing)
+        return "ignored"
+
+    if not assignee_usernames:
+        logger.info("Issue #%s description became valid but still no assignee, no notification", issue_iid)
         return "ignored"
 
     # 变更前不合规 → 变更后合规 → 通知研发认领

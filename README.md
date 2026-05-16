@@ -10,11 +10,12 @@ GitLab Webhook 接收服务，将 GitLab 事件转化为企业微信群消息，
 
 | 事件 | 触发场景 | 通知对象 |
 |------|---------|---------|
-| **Issue open / reopen** | 需求/优化 Issue，格式合规 | 研发（assignee） |
-| **Issue open / reopen** | 需求/优化 Issue，格式不合规 | 产品（reporter） |
-| **Issue open / reopen** | Bug Issue，格式合规 | 研发 + TL |
-| **Issue open / reopen** | Bug Issue，格式不合规 | 产品（reporter） |
-| **Issue update** | description 变更前不合规、变更后合规 | 研发（assignee） |
+| **Issue open / reopen** | 需求/优化 Issue，格式合规（章节齐全且已指派 assignee） | 研发（assignee） |
+| **Issue open / reopen** | 需求/优化 Issue，格式不合规（缺少章节或未指派 assignee） | 产品（reporter） |
+| **Issue open / reopen** | Bug Issue，格式合规（章节齐全且已指派 assignee） | 研发 + TL |
+| **Issue open / reopen** | Bug Issue，格式不合规（缺少章节或未指派 assignee） | 产品（reporter） |
+| **Issue update** | 新增 assignee（需求/优化/Bug） | 新增的研发（assignee） |
+| **Issue update** | description 变更前不合规、变更后合规且已有 assignee | 研发（assignee） |
 | **MR approved** | 需求 MR（`issue_*` 分支）通过 | 研发 |
 | **MR approved** | 热修 MR（`hotfix_*` 分支）通过 | 研发 + TL |
 | **MR approved** | 上线 MR（`pre` 分支）通过 | 研发 |
@@ -30,11 +31,11 @@ Issue 类型根据 description 中的模板章节自动识别，无需标题前�
 
 | 类型 | 识别依据（唯一章节） | 必填章节 |
 |------|-------------------|---------|
-| 需求 | `## 需求背景` | 需求背景、功能详细描述、验收标准、优先级 |
-| 优化 | `## 优化背景` | 优化背景、现状问题、优化方案、预期收益、优先级 |
-| Bug  | `## 问题现象` | 问题现象、复现步骤、预期正常结果、实际异常结果、出现环境、严重等级 |
+| 需求 | `## 需求背景` | 需求背景、功能详细描述、验收标准、优先级、**负责人（assignee）** |
+| 优化 | `## 优化背景` | 优化背景、现状问题、优化方案、预期收益、优先级、**负责人（assignee）** |
+| Bug  | `## 问题现象` | 问题现象、复现步骤、预期正常结果、实际异常结果、出现环境、严重等级、**负责人（assignee）** |
 
-格式不合规时通知产品补充；补全后自动触发研发认领通知。
+章节缺失或未指派研发（assignee）均视为不合规，通知产品补充；补全后自动触发研发认领通知。
 
 ### 违规操作告警
 
