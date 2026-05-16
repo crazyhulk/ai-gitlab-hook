@@ -111,6 +111,7 @@ do_start() {
 
     nohup "$PYTHON" -m uvicorn app.main:app \
         --host 0.0.0.0 --port "$PORT" \
+        --timeout-graceful-shutdown 8 \
         >> "$NOHUP_LOG" 2>&1 &
     local new_pid=$!
     echo "$new_pid" > "$PID_FILE"
