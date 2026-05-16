@@ -147,7 +147,14 @@ bash service.sh status   # 查看状态
 
 - **URL**：`http://<your-server>:<port>/gitlab/webhook`
 - **Secret token**：与 `gitlab.secret_token` 保持一致（可留空）
-- **Trigger**：勾选 `Issues events`、`Merge request events`、`Comments`、`Push events`
+- **Trigger**：勾选以下全部 4 类事件
+
+| Webhook 事件 | 覆盖功能 |
+|-------------|---------|
+| `Issues events` | Issue 创建/重开通知、格式校验（含 assignee）、assignee 变更通知、Issue 关闭违规（无人认领、产品未验收、负责人全部移除） |
+| `Merge request events` | MR 创建违规检测（缺 Closes #xxx、标题不规范、分支目标错误、pre 验收未完成）、MR Approve 通知、MR 合并违规检测（Approve 不足） |
+| `Comments` | Issue 评论中 `product:pass/reject`、`developer:pass/reject` 验收口令自动通知；普通评论转发给 assignee |
+| `Push events` | 直接 push 受保护分支告警、Force Push 告警 |
 
 ## 分支命名约定
 
