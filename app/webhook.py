@@ -1,6 +1,7 @@
+from datetime import date
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 
 from . import state
 from .handlers import handle_issue_event, handle_mr_event, handle_note_event, handle_push_event
@@ -14,6 +15,15 @@ router = APIRouter()
 @router.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.get("/violations")
+async def get_violations(
+    start: str = Query(default=str(date.today()), description="开始日期 YYYY-MM-DD"),
+    end: str = Query(default=str(date.today()), description="结束日期 YYYY-MM-DD"),
+) -> dict:
+    records = state.list_violations(start, end)
+    return {"total": len(records), "items": records}
 
 
 @router.post("/gitlab/webhook")

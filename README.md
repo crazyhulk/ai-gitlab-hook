@@ -1,17 +1,19 @@
 # ai-gitlab-hook
 
-GitLab Webhook 接收服务，将 GitLab 事件转化为企业微信群消息，驱动研发协作工作流中的各个通知节点。
+GitLab Webhook 接收服务，将 GitLab 事件转化为企业微信群消息，驱动研发协作工作流中的各个通知节点，同时对违规操作进行实时告警并持久化记录。
 
 ## 功能概览
 
-接收 GitLab 推送的三类事件，按业务规则发送企业微信通知并 @ 对应成员：
+### 工作流通知
+
+接收 GitLab 推送的四类事件，按业务规则发送企业微信通知并 @ 对应成员：
 
 | 事件 | 触发场景 | 通知对象 |
 |------|---------|---------|
-| **Issue open** | 新建`【需求】`Issue，格式合规 | 研发（assignee） |
-| **Issue open** | 新建`【需求】`Issue，格式不合规 | 产品（reporter） |
-| **Issue open** | 新建`【Bug】`Issue，格式合规 | 研发 + TL |
-| **Issue open** | 新建`【Bug】`Issue，格式不合规 | 产品（reporter） |
+| **Issue open** | 新建需求/优化 Issue，格式合规 | 研发（assignee） |
+| **Issue open** | 新建需求/优化 Issue，格式不合规 | 产品（reporter） |
+| **Issue open** | 新建 Bug Issue，格式合规 | 研发 + TL |
+| **Issue open** | 新建 Bug Issue，格式不合规 | 产品（reporter） |
 | **Issue update** | 不合规 Issue 格式补全后 | 研发（assignee） |
 | **MR approved** | 需求 MR（`issue_*` 分支）通过 | 研发 |
 | **MR approved** | 热修 MR（`hotfix_*` 分支）通过 | 研发 + TL |
@@ -20,18 +22,36 @@ GitLab Webhook 接收服务，将 GitLab 事件转化为企业微信群消息，
 | **Note** | Issue 评论含 `product:pass/reject` | 研发 |
 | **Note** | Issue 评论含 `developer:pass/reject` | 产品 |
 | **Note** | 普通 Issue 评论 | 研发（排除评论人自己） |
+| **Push** | 直接 push 到受保护分支 | 研发 + TL |
 
-### Issue 格式校验
+### Issue 类型识别
 
-**需求 Issue** 必须包含以下二级标题：`需求背景`、`功能详细描述`、`验收标准`、`优先级`
+Issue 类型根据 description 中的模板章节自动识别，无需标题前缀：
 
-**Bug Issue** 必须包含以下二级标题：`问题现象`、`复现步骤`、`预期正常结果`、`实际异常结果`、`出现环境`、`严重等级`
+| 类型 | 识别依据（唯一章节） | 必填章节 |
+|------|-------------------|---------|
+| 需求 | `## 需求背景` | 需求背景、功能详细描述、验收标准、优先级 |
+| 优化 | `## 优化背景` | 优化背景、现状问题、优化方案、预期收益、优先级 |
+| Bug  | `## 问题现象` | 问题现象、复现步骤、预期正常结果、实际异常结果、出现环境、严重等级 |
 
 格式不合规时通知产品补充；补全后自动触发研发认领通知。
 
+### 违规操作告警
+
+检测以下违规行为，实时推送企业微信告警，同时写入 SQLite 持久化记录：
+
+| 违规类型 | 触发条件 | 通知对象 |
+|---------|---------|---------|
+| 直接 push 受保护分支 | push 到 `main`/`master`/`pre` | 操作人 + TL |
+| 强制推送（Force Push） | `push_force: true`，任意分支 | 操作人 + TL |
+| 功能分支直合 main | `issue_*` → `main`/`master` 的 MR | 操作人 + TL |
+| 热修目标分支错误 | `hotfix_*` → `pre` 的 MR | 操作人 + TL |
+| 上线 MR 验收未完成 | `pre` → `main` MR 创建时有 Issue 未双向验收 | 操作人 + TL |
+| Issue 无人认领即关闭 | Issue 关闭时 assignees 为空 | TL |
+
 ## 快速开始
 
-**依赖**：Python 3.11+
+**依赖**：Python 3.9+
 
 ```bash
 # 安装依赖
@@ -51,11 +71,41 @@ bash service.sh start
 http://<your-server>:<port>/gitlab/webhook
 ```
 
-健康检查：
+## API 接口
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/health` | 健康检查 |
+| POST | `/gitlab/webhook` | GitLab Webhook 接收 |
+| GET | `/violations` | 查询违规记录（用于日报） |
+
+### 违规记录查询
 
 ```
-GET /health
+GET /violations?start=2026-05-01&end=2026-05-16
 ```
+
+返回格式：
+
+```json
+{
+  "total": 2,
+  "items": [
+    {
+      "id": 1,
+      "created_at": "2026-05-16 14:14:19",
+      "operator": "wujing03",
+      "operator_name": "邬晶",
+      "violation_type": "direct_push_protected",
+      "project": "ai-tool",
+      "description": "直接 push 到受保护分支 main，共 3 个提交",
+      "detail": "{\"branch\": \"main\", ...}"
+    }
+  ]
+}
+```
+
+`start` / `end` 默认为当天，格式 `YYYY-MM-DD`。
 
 ## 配置说明
 
@@ -65,7 +115,7 @@ GET /health
 |-----------------|------------|------|
 | `wechat.webhook_url` | `WECHAT_WEBHOOK_URL` | 企业微信群机器人 Webhook URL |
 | `gitlab.secret_token` | `GITLAB_WEBHOOK_SECRET` | GitLab Webhook Secret Token（可选） |
-| `tl_usernames` | `TL_USERNAMES=user1,user2` | TL / Reviewer 的 GitLab 用户名，热修场景额外 @ |
+| `tl_usernames` | `TL_USERNAMES=user1,user2` | TL / Reviewer 的 GitLab 用户名，违规告警及热修场景额外 @ |
 | `hotfix_required_approvals` | `HOTFIX_REQUIRED_APPROVALS` | 热修 MR 所需最少 Approve 人数，默认 2 |
 | `user_map.<username>` | `WECHAT_USER_<username>=<mobile>` | GitLab 用户名 → 企业微信手机号映射 |
 | `log.level` | `LOG_LEVEL` | 日志级别：`DEBUG` / `INFO` / `WARNING` / `ERROR` |
@@ -89,29 +139,27 @@ bash service.sh status   # 查看状态
 
 - **URL**：`http://<your-server>:<port>/gitlab/webhook`
 - **Secret token**：与 `gitlab.secret_token` 保持一致（可留空）
-- **Trigger**：勾选 `Issues events`、`Merge request events`、`Comments`
+- **Trigger**：勾选 `Issues events`、`Merge request events`、`Comments`、`Push events`
 
 ## 分支命名约定
 
-服务根据 MR 的源分支名判断 MR 类型：
-
 | 分支前缀 | 类型 |
 |---------|-----|
-| `issue_<id>` | 需求功能分支 |
+| `issue_<id>` | 需求/优化功能分支 |
 | `hotfix_<id>` | 线上热修分支 |
 | `pre` | 预发布分支（上线 MR 源分支） |
-| `main` / `master` | 主干（热修同步到 pre 时的源分支） |
+| `main` / `master` | 主干 |
 
 ## 项目结构
 
 ```
 app/
 ├── main.py       # FastAPI 应用入口及请求日志中间件
-├── webhook.py    # Webhook 路由，校验 GitLab Secret
-├── handlers.py   # 业务处理：Issue / MR / Note 事件
+├── webhook.py    # Webhook 路由，校验 GitLab Secret，提供违规查询接口
+├── handlers.py   # 业务处理：Issue / MR / Note / Push 事件
 ├── config.py     # 配置加载（config.yaml + 环境变量）
 ├── wechat.py     # 企业微信 Webhook 发送
-├── state.py      # 轻量状态机（SQLite，追踪不合规 Issue）
+├── state.py      # 状态机（SQLite）：不合规 Issue、pre 验收、违规记录
 └── logger.py     # 结构化日志
 service.sh        # 进程管理脚本（start/stop/restart/status）
 requirements.txt  # Python 依赖

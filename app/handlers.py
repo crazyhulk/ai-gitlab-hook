@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import re
 from typing import Any
 
@@ -45,12 +47,12 @@ def handle_issue_event(payload: dict[str, Any], config: Config) -> str:
     attrs = payload.get("object_attributes", {}) or {}
     action = attrs.get("action", "")
     if not action:
-        state = attrs.get("state", "")
+        issue_state = attrs.get("state", "")
         changes = payload.get("changes") or {}
-        if state == "opened":
+        if issue_state == "opened":
             action = "update" if changes else "open"
-        elif state in ("closed", "reopened"):
-            action = state
+        elif issue_state in ("closed", "reopened"):
+            action = issue_state
     issue_iid = attrs.get("iid")
     issue_title = attrs.get("title", "")
     issue_url = attrs.get("url", "")
@@ -99,6 +101,33 @@ def handle_issue_event(payload: dict[str, Any], config: Config) -> str:
                 is_bug=is_bug,
                 issue_type=issue_type,
             )
+        return "ignored"
+
+    if action == "close":
+        if not assignees and issue_type in ("feature", "improve", "bug"):
+            project = payload.get("project", {}) or {}
+            project_name = project.get("name", "")
+            type_label = {"bug": "Bug", "improve": "优化"}.get(issue_type or "", "需求")
+            content = (
+                f"### ⚠️ Issue 无人认领即关闭\n"
+                f"> **Issue #{issue_iid}**：{issue_title}\n"
+                f"> **类型**：{type_label}\n"
+                f"> **关闭人**：{reporter_name}\n"
+                f"> [查看 Issue]({issue_url})\n\n"
+                f"**注意**：此 Issue 未指派给任何人就被关闭，请确认是否遗漏处理。"
+            )
+            at_mobiles = config.tl_mobiles
+            logger.warning("Issue #%s closed with no assignee type=%s project=%s", issue_iid, issue_type, project_name)
+            state.record_violation(
+                operator=reporter_username,
+                operator_name=reporter_name,
+                violation_type="issue_closed_no_assignee",
+                description=f"Issue #{issue_iid}「{issue_title}」无人认领即关闭",
+                project=project_name,
+                detail={"issue_iid": issue_iid, "issue_type": issue_type, "issue_url": issue_url},
+            )
+            send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
+            return "ok"
         return "ignored"
 
     logger.info("Issue event action=%s not handled", action)
@@ -244,11 +273,113 @@ def _on_issue_update(
 #   节点3 — 需求 MR Approve 后，Reviewer 通知研发可合并
 #   节点4 — 上线 MR Approve 后，TL 通知研发可上线
 #   节点5 — 热修 MR Approve 后，Reviewer 通知研发可合并
+# 违规检测：
+#   - 功能分支（issue_*）直接合入 main/master，绕过 pre
+#   - 热修分支（hotfix_*）目标分支为 pre 而非 main/master
+#   - 上线 MR 创建时 pre 双向验收未完成
 # ──────────────────────────────────────────────────────────────
+
+_MAIN_BRANCHES = {"main", "master"}
+
+
+def _on_mr_open(
+    payload: dict[str, Any],
+    attrs: dict[str, Any],
+    config: Config,
+) -> str:
+    mr_iid = attrs.get("iid", "?")
+    mr_title = attrs.get("title", "")
+    mr_url = attrs.get("url", "")
+    source_branch: str = attrs.get("source_branch", "")
+    target_branch: str = attrs.get("target_branch", "")
+
+    user = payload.get("user", {}) or {}
+    author_name = user.get("name", "")
+    author_username = user.get("username", "")
+
+    project = payload.get("project", {}) or {}
+    project_name = project.get("name", "")
+
+    violations_found = False
+
+    # 功能分支直接合入 main，跳过 pre
+    if source_branch.startswith("issue_") and target_branch in _MAIN_BRANCHES:
+        content = (
+            f"### ⚠️ 功能分支直接合入 {target_branch}，违反上线流程\n"
+            f"> **MR !{mr_iid}**：{mr_title}\n"
+            f"> **操作人**：{author_name}（`{author_username}`）\n"
+            f"> `{source_branch}` → `{target_branch}`\n"
+            f"> [查看 MR]({mr_url})\n\n"
+            f"**注意**：功能分支应先合入 `pre` 完成验收，再通过上线 MR 合入 `{target_branch}`。"
+        )
+        at_mobiles = list(dict.fromkeys(config.tl_mobiles + config.resolve_wechat_ids([author_username])))
+        logger.warning("MR !%s feature branch direct to %s author=%s project=%s", mr_iid, target_branch, author_username, project_name)
+        state.record_violation(
+            operator=author_username, operator_name=author_name,
+            violation_type="mr_feature_to_main",
+            description=f"MR !{mr_iid}「{mr_title}」功能分支 {source_branch} 直接合入 {target_branch}",
+            project=project_name,
+            detail={"mr_iid": mr_iid, "source_branch": source_branch, "target_branch": target_branch, "mr_url": mr_url},
+        )
+        send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
+        violations_found = True
+
+    # 热修分支目标分支错误（应合 main，却合 pre）
+    if source_branch.startswith("hotfix_") and target_branch == "pre":
+        content = (
+            f"### ⚠️ 热修分支目标分支错误\n"
+            f"> **MR !{mr_iid}**：{mr_title}\n"
+            f"> **操作人**：{author_name}（`{author_username}`）\n"
+            f"> `{source_branch}` → `{target_branch}`（应为 `main`/`master`）\n"
+            f"> [查看 MR]({mr_url})\n\n"
+            f"**注意**：热修分支应直接合入 `main`/`master` 上线，请修改 MR 目标分支。"
+        )
+        at_mobiles = list(dict.fromkeys(config.tl_mobiles + config.resolve_wechat_ids([author_username])))
+        logger.warning("MR !%s hotfix branch targeting pre author=%s project=%s", mr_iid, author_username, project_name)
+        state.record_violation(
+            operator=author_username, operator_name=author_name,
+            violation_type="mr_hotfix_wrong_target",
+            description=f"MR !{mr_iid}「{mr_title}」热修分支 {source_branch} 目标为 pre 而非 main",
+            project=project_name,
+            detail={"mr_iid": mr_iid, "source_branch": source_branch, "target_branch": target_branch, "mr_url": mr_url},
+        )
+        send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
+        violations_found = True
+
+    # 上线 MR（pre → main），检查 pre 双向验收是否完成
+    if source_branch == "pre" and target_branch in _MAIN_BRANCHES:
+        incomplete = state.get_incomplete_pre_verifications()
+        if incomplete:
+            issue_list = "、".join(f"#{iid}" for iid in incomplete[:10])
+            content = (
+                f"### ⚠️ 上线 MR 创建，但 pre 验收未完成\n"
+                f"> **MR !{mr_iid}**：{mr_title}\n"
+                f"> **操作人**：{author_name}（`{author_username}`）\n"
+                f"> [查看 MR]({mr_url})\n\n"
+                f"**以下 Issue 仅完成单方验收**：{issue_list}\n\n"
+                f"**注意**：上线前需 `product:pass` 和 `developer:pass` 双方均通过，请确认后再合并。"
+            )
+            at_mobiles = list(dict.fromkeys(config.tl_mobiles + config.resolve_wechat_ids([author_username])))
+            logger.warning("Release MR !%s created but incomplete pre verifications: %s", mr_iid, incomplete)
+            state.record_violation(
+                operator=author_username, operator_name=author_name,
+                violation_type="mr_release_unverified",
+                description=f"MR !{mr_iid}「{mr_title}」上线前 pre 验收未完成，涉及 Issue: {issue_list}",
+                project=project_name,
+                detail={"mr_iid": mr_iid, "incomplete_issues": incomplete, "mr_url": mr_url},
+            )
+            send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
+            violations_found = True
+
+    return "ok" if violations_found else "ignored"
+
 
 def handle_mr_event(payload: dict[str, Any], config: Config) -> str:
     attrs = payload.get("object_attributes", {}) or {}
     action = attrs.get("action", "")
+
+    if action == "open":
+        return _on_mr_open(payload, attrs, config)
 
     if action != "approved":
         logger.info("MR event action=%s, ignored", action)
@@ -554,6 +685,9 @@ def _handle_verdict_comment(
         f"{next_steps}"
     )
 
+    if is_pass and isinstance(issue_iid, int):
+        state.mark_pre_pass(issue_iid, role)
+
     logger.info(
         "Verdict note issue=#%s role=%s verdict=%s commenter=%s at_mobiles=%s",
         issue_iid, role, verdict, commenter_username, at_mobiles,
@@ -573,10 +707,7 @@ _PROTECTED_BRANCHES = {"main", "master", "pre"}
 def handle_push_event(payload: dict[str, Any], config: Config) -> str:
     ref: str = payload.get("ref", "")
     branch = ref.removeprefix("refs/heads/")
-
-    if branch not in _PROTECTED_BRANCHES:
-        logger.info("Push to non-protected branch=%s, ignored", branch)
-        return "ignored"
+    is_force = payload.get("push_force", False)
 
     pusher_name = payload.get("user_name", "")
     pusher_username = payload.get("user_username", "")
@@ -585,6 +716,7 @@ def handle_push_event(payload: dict[str, Any], config: Config) -> str:
     project_url = project.get("web_url", "")
     commits: list[dict] = payload.get("commits") or []
     total = payload.get("total_commits_count", len(commits))
+    at_mobiles = list(dict.fromkeys(config.tl_mobiles + config.resolve_wechat_ids([pusher_username])))
 
     commit_lines = ""
     for c in commits[:5]:
@@ -593,23 +725,54 @@ def handle_push_event(payload: dict[str, Any], config: Config) -> str:
     if total > 5:
         commit_lines += f"> - ...共 {total} 个提交\n"
 
-    content = (
-        f"### ⚠️ 直接 Push 到受保护分支\n"
-        f"> **项目**：{project_name}\n"
-        f"> **分支**：`{branch}`\n"
-        f"> **操作人**：{pusher_name}（`{pusher_username}`）\n"
-        f"> **提交数**：{total}\n"
-        f"{commit_lines}"
-        f"> [查看项目]({project_url})\n\n"
-        f"**注意**：`{branch}` 为受保护分支，应通过 MR 合并，请确认此次推送是否符合规范。"
-    )
+    notified = False
 
-    at_mobiles = config.tl_mobiles + config.resolve_wechat_ids([pusher_username])
-    at_mobiles = list(dict.fromkeys(at_mobiles))
+    # 强制推送：任意分支均告警
+    if is_force:
+        content = (
+            f"### 🚨 强制推送（Force Push）告警\n"
+            f"> **项目**：{project_name}\n"
+            f"> **分支**：`{branch}`\n"
+            f"> **操作人**：{pusher_name}（`{pusher_username}`）\n"
+            f"> [查看项目]({project_url})\n\n"
+            f"**警告**：强制推送会覆盖历史提交，可能导致他人代码丢失，请立即确认影响范围。"
+        )
+        logger.warning("Force push branch=%s pusher=%s project=%s", branch, pusher_username, project_name)
+        state.record_violation(
+            operator=pusher_username, operator_name=pusher_name,
+            violation_type="force_push",
+            description=f"强制推送到分支 {branch}",
+            project=project_name,
+            detail={"branch": branch, "project_url": project_url},
+        )
+        send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
+        notified = True
 
-    logger.info(
-        "Push to protected branch=%s pusher=%s commits=%s project=%s",
-        branch, pusher_username, total, project_name,
-    )
-    send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
+    # 直接推送到受保护分支（未经 MR）
+    if branch in _PROTECTED_BRANCHES:
+        content = (
+            f"### ⚠️ 直接 Push 到受保护分支\n"
+            f"> **项目**：{project_name}\n"
+            f"> **分支**：`{branch}`\n"
+            f"> **操作人**：{pusher_name}（`{pusher_username}`）\n"
+            f"> **提交数**：{total}\n"
+            f"{commit_lines}"
+            f"> [查看项目]({project_url})\n\n"
+            f"**注意**：`{branch}` 为受保护分支，应通过 MR 合并，请确认此次推送是否符合规范。"
+        )
+        logger.warning("Direct push to protected branch=%s pusher=%s commits=%s project=%s", branch, pusher_username, total, project_name)
+        state.record_violation(
+            operator=pusher_username, operator_name=pusher_name,
+            violation_type="direct_push_protected",
+            description=f"直接 push 到受保护分支 {branch}，共 {total} 个提交",
+            project=project_name,
+            detail={"branch": branch, "total_commits": total, "project_url": project_url},
+        )
+        send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
+        notified = True
+
+    if not notified:
+        logger.info("Push to non-protected branch=%s force=%s, ignored", branch, is_force)
+        return "ignored"
+
     return "ok"
