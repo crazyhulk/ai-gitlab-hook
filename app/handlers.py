@@ -684,12 +684,23 @@ def handle_mr_event(payload: dict[str, Any], config: Config) -> str:
         single = payload.get("assignee") or {}
         if single:
             assignees = [single]
-    assignee_names = [a.get("name", "") for a in assignees if a.get("name")]
-    assignee_usernames = [a.get("username", "") for a in assignees if a.get("username")]
-    developer_label = "、".join(assignee_names) if assignee_names else "研发"
 
     project = payload.get("project", {}) or {}
     project_name = project.get("name", "")
+    project_id = project.get("id")
+
+    # payload 里 assignees 为空时，调 API 补全（部分 GitLab 版本 approved 事件不带 assignees）
+    if not assignees and config.gitlab_client and project_id:
+        mr_detail = config.gitlab_client.get_mr(project_id, mr_iid)
+        assignees = mr_detail.get("assignees") or []
+        if not assignees:
+            single = mr_detail.get("assignee") or {}
+            if single:
+                assignees = [single]
+
+    assignee_names = [a.get("name", "") for a in assignees if a.get("name")]
+    assignee_usernames = [a.get("username", "") for a in assignees if a.get("username")]
+    developer_label = "、".join(assignee_names) if assignee_names else "研发"
 
     logger.info(
         "MR approved event mr=!%s source=%s target=%s approver=%s assignees=%s project=%s",
