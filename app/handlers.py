@@ -102,7 +102,8 @@ def handle_issue_event(payload: dict[str, Any], config: Config) -> str:
                 if new_assignees:
                     _on_issue_assignee_change(
                         config, issue_iid, issue_title, issue_url,
-                        reporter_name, new_assignees, is_bug=is_bug, issue_type=issue_type,
+                        reporter_name, reporter_username, description,
+                        new_assignees, is_bug=is_bug, issue_type=issue_type,
                     )
                     notified = True
                 elif not (assignees_change.get("current") or []) and (assignees_change.get("previous") or []):
@@ -171,33 +172,41 @@ def handle_issue_event(payload: dict[str, Any], config: Config) -> str:
             if project_id:
                 notes = config.gitlab_client.get_issue_notes(project_id, issue_iid)
                 product_verdict = config.gitlab_client._latest_verdict(notes, "product")
-                if product_verdict != "pass":
+                developer_verdict = config.gitlab_client._latest_verdict(notes, "developer")
+                if product_verdict != "pass" or developer_verdict != "pass":
                     type_label = "优化" if issue_type == "improve" else "需求"
-                    verdict_label = "已拒绝" if product_verdict == "reject" else "未验收"
+                    _vl = {"pass": "已通过", "reject": "已拒绝", "pending": "未验收"}
+                    pending_parts = []
+                    if product_verdict != "pass":
+                        pending_parts.append(f"产品：{_vl[product_verdict]}")
+                    if developer_verdict != "pass":
+                        pending_parts.append(f"研发：{_vl[developer_verdict]}")
+                    verdict_label = "、".join(pending_parts)
                     content = (
-                        f"### ⚠️ {type_label} Issue 未完成产品验收即关闭\n"
+                        f"### ⚠️ {type_label} Issue 未完成双方验收即关闭\n"
                         f"> **Issue #{issue_iid}**：{issue_title}\n"
                         f"> **关闭人**：{reporter_name}\n"
-                        f"> **产品验收状态**：{verdict_label}\n"
+                        f"> **验收状态**：{verdict_label}\n"
                         f"> [查看 Issue]({issue_url})\n\n"
-                        f"**注意**：该 {type_label} Issue 尚无 `product:pass` 记录即被关闭，"
-                        f"请确认功能是否经过产品验收，或补充验收口令后重新关闭。"
+                        f"**注意**：该 {type_label} Issue 需 `product:pass` 和 `developer:pass` 双方确认后才可关闭，"
+                        f"请补充验收口令后重新关闭。"
                     )
                     at_mobiles = list(dict.fromkeys(
                         config.tl_mobiles + config.resolve_wechat_ids(assignee_usernames + [reporter_username])
                     ))
                     logger.warning(
-                        "Issue #%s closed without product:pass type=%s verdict=%s project=%s",
-                        issue_iid, issue_type, product_verdict, project_name,
+                        "Issue #%s closed without full acceptance type=%s product=%s developer=%s project=%s",
+                        issue_iid, issue_type, product_verdict, developer_verdict, project_name,
                     )
                     state.record_violation(
                         operator=reporter_username,
                         operator_name=reporter_name,
                         violation_type="issue_closed_no_product_pass",
-                        description=f"Issue #{issue_iid}「{issue_title}」未完成产品验收即关闭（{verdict_label}）",
+                        description=f"Issue #{issue_iid}「{issue_title}」未完成双方验收即关闭（{verdict_label}）",
                         project=project_name,
                         detail={"issue_iid": issue_iid, "issue_type": issue_type,
-                                "product_verdict": product_verdict, "issue_url": issue_url},
+                                "product_verdict": product_verdict, "developer_verdict": developer_verdict,
+                                "issue_url": issue_url},
                     )
                     send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
                     notified = True
@@ -229,8 +238,7 @@ def _on_feature_issue_open(
             f"**不合规详情**\n"
             f"> 缺少必填小节：{missing_str}\n\n"
             f"**下一步 · {reporter_name}（产品）**\n"
-            f"> 请按标准模板补充以上小节内容\n"
-            f"> 补充完成后研发即可执行：`ccg gitlab feature start {issue_iid}`"
+            f"> 请按标准模板补充以上小节内容"
         )
         at_mobiles = config.resolve_wechat_ids([reporter_username])
         logger.info("Feature/improve issue #%s invalid missing=%s, notifying reporter=%s", issue_iid, missing, reporter_username)
@@ -273,8 +281,7 @@ def _on_bug_issue_open(
             f"**不合规详情**\n"
             f"> 缺少必填小节：{missing_str}\n\n"
             f"**下一步 · {reporter_name}（产品）**\n"
-            f"> 请补充完整以上小节内容，Bug 越描述清楚修复越快\n"
-            f"> 补充完成后研发即可执行：`ccg gitlab hotfix start {issue_iid}`"
+            f"> 请补充完整以上小节内容，Bug 越描述清楚修复越快"
         )
         at_mobiles = config.resolve_wechat_ids([reporter_username])
         logger.info("Bug issue #%s invalid missing=%s, notifying reporter=%s", issue_iid, missing, reporter_username)
@@ -310,15 +317,44 @@ def _on_issue_assignee_change(
     config: Config,
     issue_iid, issue_title, issue_url,
     reporter_name: str,
+    reporter_username: str,
+    description: str,
     new_assignees: list[dict],
     is_bug: bool,
     issue_type: str | None,
 ) -> None:
-    cmd = f"ccg gitlab hotfix start {issue_iid}" if is_bug else f"ccg gitlab feature start {issue_iid}"
     type_label = "Bug" if is_bug else ("优化" if issue_type == "improve" else "需求")
     assignee_names = [a.get("name", "") for a in new_assignees if a.get("name")]
     assignee_usernames = [a.get("username", "") for a in new_assignees if a.get("username")]
     assignee_str = "、".join(assignee_names)
+
+    # 指派时同步校验模板，与 ccg feature/hotfix start 保持一致
+    if is_bug:
+        sections = _BUG_SECTIONS
+    elif issue_type == "improve":
+        sections = _IMPROVE_SECTIONS
+    else:
+        sections = _FEATURE_SECTIONS
+    missing = _missing_sections(description, sections)
+
+    if missing:
+        missing_str = "、".join(missing)
+        content = (
+            f"### {type_label} Issue 格式不合规\n"
+            f"> **Issue #{issue_iid}**：{issue_title}\n"
+            f"> **提出人**：{reporter_name}\n"
+            f"> [查看 Issue]({issue_url})\n\n"
+            f"**不合规详情**\n"
+            f"> 缺少必填小节：{missing_str}\n\n"
+            f"**下一步 · {reporter_name}（产品）**\n"
+            f"> 请按标准模板补充以上小节内容"
+        )
+        at_mobiles = config.resolve_wechat_ids([reporter_username])
+        logger.info("Issue #%s assignee set but template invalid missing=%s, notifying reporter=%s", issue_iid, missing, reporter_username)
+        send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
+        return
+
+    cmd = f"ccg gitlab hotfix start {issue_iid}" if is_bug else f"ccg gitlab feature start {issue_iid}"
     content = (
         f"### {type_label} Issue 已指派\n"
         f"> **Issue #{issue_iid}**：{issue_title}\n"
@@ -980,8 +1016,10 @@ def handle_push_event(payload: dict[str, Any], config: Config) -> str:
 
     notified = False
 
-    # 强制推送：任意分支均告警
-    if is_force:
+    # 强制推送：个人功能/热修分支 rebase 后 ccg 会 force-with-lease，属正常操作，跳过
+    if is_force and branch.startswith(("issue_", "hotfix_")):
+        logger.info("Force push to feature/hotfix branch %s (likely post-rebase), skipped", branch)
+    elif is_force:
         content = (
             f"### 🚨 强制推送（Force Push）告警\n"
             f"> **项目**：{project_name}\n"

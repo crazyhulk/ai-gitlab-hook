@@ -14,7 +14,8 @@ GitLab Webhook 接收服务，将 GitLab 事件转化为企业微信群消息，
 | **Issue open / reopen** | 需求/优化 Issue，格式不合规（缺少章节或未指派 assignee） | 产品（reporter） |
 | **Issue open / reopen** | Bug Issue，格式合规（章节齐全且已指派 assignee） | 研发 + TL |
 | **Issue open / reopen** | Bug Issue，格式不合规（缺少章节或未指派 assignee） | 产品（reporter） |
-| **Issue update** | 新增 assignee（需求/优化/Bug） | 新增的研发（assignee） |
+| **Issue update** | 新增 assignee（需求/优化/Bug），模板格式合规 | 新增的研发（assignee） |
+| **Issue update** | 新增 assignee（需求/优化/Bug），模板格式不合规（缺少章节） | 产品（reporter） |
 | **Issue update** | description 变更前不合规、变更后合规且已有 assignee | 研发（assignee） |
 | **MR approved** | 需求 MR（`issue_*` 分支）通过 | 研发 |
 | **MR approved** | 热修 MR（`hotfix_*` → `main`，紧急路径）通过 | 研发 + TL |
@@ -45,14 +46,14 @@ Issue 类型根据 description 中的模板章节自动识别，无需标题前�
 | 违规类型 | 触发条件 | 通知对象 |
 |---------|---------|---------|
 | 直接 push 受保护分支 | push 到 `main`/`master`/`pre` | 操作人 + TL |
-| 强制推送（Force Push） | `push_force: true`，任意分支 | 操作人 + TL |
+| 强制推送（Force Push） | `push_force: true`，非 `issue_*`/`hotfix_*` 分支（功能/热修分支 rebase 后的 force-with-lease 属正常操作，不告警） | 操作人 + TL |
 | 功能分支直合 main | `issue_*` → `main`/`master` 的 MR，跳过 pre 验收 | 操作人 + TL |
-| 上线 MR 验收未完成 | `pre` → `main` MR 创建时实时查 GitLab，有 Issue 未完成 `product:pass` + `developer:pass` | 操作人 + TL |
+| 上线 MR 验收未完成 | `pre` → `main` MR 创建时实时查 GitLab，有 Issue 在合入 `pre` 之后未完成 `product:pass` + `developer:pass` | 操作人 + TL |
 | Issue 无人认领即关闭 | Issue 关闭时 assignees 为空 | TL |
 | Issue 负责人被全部移除 | Issue update 时 assignees 由有变无 | TL |
 | MR 缺少 Issue 关联 | `issue_*`/`hotfix_*` MR 描述无 `Closes #xxx`，未通过 `ccg mr create` 创建 | 操作人 + TL |
 | MR 标题不符规范 | `issue_*` MR 标题不以 `[需求]` 开头，或 `hotfix_*` 不以 `[Bug热修]` 开头 | 操作人 + TL |
-| Issue 未验收即关闭 | 需求/优化 Issue 关闭时查 GitLab API，无 `product:pass` 记录 | 操作人 + TL |
+| Issue 未验收即关闭 | 需求/优化 Issue 关闭时查 GitLab API，`product:pass` 或 `developer:pass` 任一未完成 | 操作人 + TL |
 | MR 审批不足即合并 | `issue_*`/`hotfix_*` MR 合并时查 GitLab API，Approve 不足（`hotfix_*` → `main` 需 N 人，其余需 1 人） | 操作人 + TL |
 | 热修未及时同步 pre | 热修 MR 合入 `main` 后超过 `hotfix_sync_threshold_hours`（默认 4 小时）未同步到 `pre` | TL |
 
@@ -174,10 +175,10 @@ bash service.sh status   # 查看状态
 
 | Webhook 事件 | 覆盖功能 |
 |-------------|---------|
-| `Issues events` | Issue 创建/重开通知、格式校验（含 assignee）、assignee 变更通知、Issue 关闭违规（无人认领、未产品验收、负责人全部移除） |
+| `Issues events` | Issue 创建/重开通知、格式校验（含 assignee）、assignee 变更时重新校验模板并通知、description 补全后通知研发认领、Issue 关闭违规（无人认领、未双方验收、负责人全部移除） |
 | `Merge request events` | MR 创建违规检测（缺 `Closes #xxx`、标题不规范、功能分支直合 main、pre 验收未完成）、MR Approve 通知、MR 合并违规检测（Approve 不足） |
 | `Comments` | Issue 评论中 `product:pass/reject`、`developer:pass/reject` 验收口令自动通知；普通评论转发给 assignee |
-| `Push events` | 直接 push 受保护分支告警、Force Push 告警 |
+| `Push events` | 直接 push 受保护分支告警、Force Push 告警（`issue_*`/`hotfix_*` 分支除外） |
 
 ## 分支命名约定
 

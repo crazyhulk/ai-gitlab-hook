@@ -111,23 +111,28 @@ class GitLabClient:
         verdict: 'pass' | 'reject' | 'pending'
         """
         mrs = self.get_merged_mrs_to_pre(project_id, pre_branch)
-        issue_iids: set[int] = set()
+        # 记录每个 issue 最晚的 merged_at，验收口令必须在此之后才算数
+        issue_merged_at: dict[int, str] = {}
         for mr in mrs:
             desc = mr.get("description") or ""
+            merged_at: str = mr.get("merged_at") or ""
             for m in _CLOSES_RE.findall(desc):
-                issue_iids.add(int(m))
+                iid = int(m)
+                if iid not in issue_merged_at or merged_at > issue_merged_at[iid]:
+                    issue_merged_at[iid] = merged_at
 
-        if not issue_iids:
+        if not issue_merged_at:
             return []
 
         incomplete = []
-        for iid in sorted(issue_iids):
+        for iid in sorted(issue_merged_at):
             issue = self.get_issue(project_id, iid)
             if not issue or issue.get("state") != "opened":
                 continue
             notes = self.get_issue_notes(project_id, iid)
-            product_verdict = self._latest_verdict(notes, "product")
-            developer_verdict = self._latest_verdict(notes, "developer")
+            since = issue_merged_at[iid]
+            product_verdict = self._latest_verdict(notes, "product", since)
+            developer_verdict = self._latest_verdict(notes, "developer", since)
             if product_verdict != "pass" or developer_verdict != "pass":
                 incomplete.append({
                     "issue_iid": iid,
@@ -140,8 +145,11 @@ class GitLabClient:
         return incomplete
 
     @staticmethod
-    def _latest_verdict(notes: list[dict], role: str) -> str:
-        """返回最新的 pass/reject/pending，notes 按时间任意顺序均可。"""
+    def _latest_verdict(notes: list[dict], role: str, since_time: str = "") -> str:
+        """返回最新的 pass/reject/pending，notes 按时间任意顺序均可。
+
+        since_time: 只统计 created_at > since_time 的评论（ISO8601 字符串比较）。
+        """
         latest_time = ""
         latest_verdict = "pending"
         for note in notes:
@@ -151,6 +159,8 @@ class GitLabClient:
             m = _VERDICT_RE.search(body)
             if m and m.group("role").lower() == role:
                 t = note.get("created_at", "")
+                if since_time and t <= since_time:
+                    continue
                 if t > latest_time:
                     latest_time = t
                     raw = m.group("verdict").lower()
