@@ -95,7 +95,7 @@ Issue 类型根据 description 中的模板章节自动识别，无需标题前�
 | Issue 负责人被全部移除 | Issue update 时 assignees 由有变无 | TL |
 | MR 缺少 Issue 关联 | `issue_*`/`hotfix_*` MR 描述无 `Closes #xxx`，未通过 `ccg mr create` 创建 | 操作人 + TL |
 | MR 标题不符规范 | `issue_*` MR 标题不以 `[需求]` 开头，或 `hotfix_*` 不以 `[Bug热修]` 开头 | 操作人 + TL |
-| Issue 未验收即关闭 | 需求/优化 Issue 关闭时查 GitLab API，`product:pass` 或 `developer:pass` 任一未完成 | 操作人 + TL |
+| Issue 未验收即关闭 | 需求/优化 Issue 关闭时查 GitLab API，`product:pass` 和 `developer:pass` 均需完成 | 操作人 + TL |
 | MR 审批不足即合并 | `issue_*`/`hotfix_*` MR 合并时查 GitLab API，Approve 不足（`hotfix_*` → `main` 需 N 人，其余需 1 人） | 操作人 + TL |
 | 热修未及时同步 pre | 热修 MR 合入 `main` 后超过 `hotfix_sync_threshold_hours`（默认 4 小时）未同步到 `pre` | TL |
 
@@ -308,20 +308,6 @@ bash service.sh status   # 查看状态
 └─────────────────────────────────────────────────────────────┘
 ```
 
-#### 3. Issue 关联门禁（功能/热修分支 → pre/main）
-
-**说明**：
-- 对 `pre` 和 `main` 分支都生效，防止绕过验收检查
-- 功能分支直接合入 `main` 虽然违规，但仍需要 Issue 关联才能追踪验收状态
-- 支持新旧分支格式：`issue_*`、`hotfix_*`、`feature/*`、`hotfix/*`
-
-**优势**：
-- ✅ 即使不使用 `ccg gitlab mr merge`，也无法绕过这些检查
-- ✅ 状态实时同步到 GitLab MR 页面
-- ✅ 用户能清楚看到当前阻塞原因
-- ✅ 满足条件后自动解除阻止，无需手动操作
-- ✅ 强制规范流程，防止遗漏验收或缺少 Issue 关联
-
 ## 分支命名约定
 
 | 分支格式 | 类型 | 示例 |
@@ -458,8 +444,13 @@ A: 不建议绕过，但如果确实需要（如紧急情况）：
 2. 合并后立即重新勾选
 3. 这种操作会被记录在 GitLab 审计日志中
 
-### Q: 合并门禁会影响其他类型的 MR 吗？
+### Q: 合并门禁会影响哪些 MR？
 
-A: 不会。合并门禁只对上线 MR（`pre` → `main`）生效，其他 MR（如 `issue_*` → `pre`、`hotfix_*` → `main`）不受影响。
+A: 共三类门禁，分别针对不同类型的 MR：
+- **`issue_*`/`hotfix_*` → `pre`/`main`**：Issue 关联门禁，MR 描述必须包含 `Closes #xxx`
+- **`hotfix_*` → `main`**：审批门禁，需满足最低 Approve 人数
+- **`pre` → `main`**：验收门禁，所有关联 Issue 必须完成双方验收
+
+所有门禁均通过 Commit Status 实现，无法在 GitLab 页面绕过。
 
 
