@@ -35,6 +35,21 @@ def _detect_issue_type(description: str) -> str | None:
     return None
 
 
+def _is_feature_branch(branch: str) -> bool:
+    """判断是否为功能分支（新格式 feature/ 或旧格式 issue_）"""
+    return branch.startswith("feature/") or branch.startswith("issue_")
+
+
+def _is_hotfix_branch(branch: str) -> bool:
+    """判断是否为热修分支（新格式 hotfix/ 或旧格式 hotfix_）"""
+    return branch.startswith("hotfix/") or branch.startswith("hotfix_")
+
+
+def _is_feature_or_hotfix_branch(branch: str) -> bool:
+    """判断是否为功能或热修分支"""
+    return _is_feature_branch(branch) or _is_hotfix_branch(branch)
+
+
 # ──────────────────────────────────────────────────────────────
 # Issue Hook
 # 覆盖的人工通知节点：
@@ -449,11 +464,163 @@ def _on_mr_open(
 
     project = payload.get("project", {}) or {}
     project_name = project.get("name", "")
+    project_id = project.get("id")
 
     violations_found = False
 
+    # 热修 MR（hotfix_* → main），检查 Approve 数量
+    is_hotfix_to_main = _is_hotfix_branch(source_branch) and target_branch == config.main_branch
+    if is_hotfix_to_main:
+        if config.gitlab_client is None:
+            logger.warning("GitLab client not configured, skipping approval check for MR !%s", mr_iid)
+        else:
+            try:
+                approvals_data = config.gitlab_client.get_mr_approvals(project_id, mr_iid)
+                approved_by = approvals_data.get("approved_by") or []
+                current_approvals = len(approved_by)
+                required_approvals = config.hotfix_required_approvals
+            except Exception as e:
+                logger.warning("Approval check failed for MR !%s: %s", mr_iid, e)
+                current_approvals = 0
+                required_approvals = config.hotfix_required_approvals
+
+            # 设置 Commit Status 作为合并门禁
+            commit_sha = attrs.get("last_commit", {}).get("id") if isinstance(attrs.get("last_commit"), dict) else None
+            if not commit_sha:
+                commit_sha = attrs.get("sha")
+
+            if commit_sha and project_id:
+                if current_approvals < required_approvals:
+                    # Approve 不足 → 设置为 failed，阻止合并
+                    description = f"需要 {required_approvals} 人 Approve，当前 {current_approvals} 人"
+                    config.gitlab_client.set_commit_status(
+                        project_id=project_id,
+                        commit_sha=commit_sha,
+                        state="failed",
+                        name="hotfix-approval-check",
+                        description=description,
+                        target_url=mr_url,
+                    )
+                    logger.info("Set commit status failed for hotfix MR !%s: %s/%s approvals", mr_iid, current_approvals, required_approvals)
+                else:
+                    # Approve 已满足 → 设置为 success，允许合并
+                    description = f"✓ 已获得 {current_approvals} 人 Approve，满足要求"
+                    config.gitlab_client.set_commit_status(
+                        project_id=project_id,
+                        commit_sha=commit_sha,
+                        state="success",
+                        name="hotfix-approval-check",
+                        description=description,
+                    )
+                    logger.info("Set commit status success for hotfix MR !%s: %s approvals", mr_iid, current_approvals)
+
+    # 上线 MR（pre → main），检查 pre 双向验收是否完成
+    is_release_mr = source_branch == config.pre_branch and target_branch == config.main_branch
+    if is_release_mr:
+        if config.gitlab_client is None:
+            logger.warning("GitLab client not configured, skipping pre verification check for MR !%s", mr_iid)
+        else:
+            try:
+                incomplete = config.gitlab_client.check_pre_verification_status(project_id, config.pre_branch)
+            except Exception as e:
+                logger.warning("Pre verification check failed for MR !%s: %s", mr_iid, e)
+                incomplete = []
+
+            # 设置 Commit Status 作为合并门禁
+            commit_sha = attrs.get("last_commit", {}).get("id") if isinstance(attrs.get("last_commit"), dict) else None
+            if not commit_sha:
+                # 兼容不同 GitLab 版本的 payload 格式
+                commit_sha = attrs.get("sha")
+
+            if commit_sha and project_id:
+                if incomplete:
+                    # 验收未完成 → 设置为 failed，阻止合并
+                    issue_ids = [item["issue_iid"] for item in incomplete]
+                    # 构建详细的状态描述（GitLab 限制 255 字符，简洁版）
+                    status_parts = []
+                    for item in incomplete[:3]:  # 最多显示 3 个
+                        iid = item["issue_iid"]
+                        p = "✓" if item["product_verdict"] == "pass" else "✗"
+                        d = "✓" if item["developer_verdict"] == "pass" else "✗"
+                        status_parts.append(f"#{iid}(产品{p} 研发{d})")
+                    if len(incomplete) > 3:
+                        status_parts.append(f"等{len(incomplete)}个")
+                    description = f"验收未完成: {' '.join(status_parts)}"
+
+                    config.gitlab_client.set_commit_status(
+                        project_id=project_id,
+                        commit_sha=commit_sha,
+                        state="failed",
+                        name="pre-acceptance-check",
+                        description=description[:255],  # GitLab 限制 255 字符
+                        target_url=incomplete[0]["issue_url"] if incomplete else "",  # 点击跳转到第一个 Issue
+                    )
+                else:
+                    # 验收已完成 → 设置为 success，允许合并
+                    config.gitlab_client.set_commit_status(
+                        project_id=project_id,
+                        commit_sha=commit_sha,
+                        state="success",
+                        name="pre-acceptance-check",
+                        description="✓ 所有 Issue 验收已完成，可以合并",
+                    )
+
+            if incomplete:
+                _verdict_label = {"pass": "✓ 已通过", "reject": "✗ 已拒绝", "pending": "✗ 未验收"}
+                issue_lines = "\n".join(
+                    f"> **Issue #{item['issue_iid']}**：[{item['issue_title']}]({item['issue_url']})\n"
+                    f">   产品：{_verdict_label[item['product_verdict']]}　　"
+                    f"研发：{_verdict_label[item['developer_verdict']]}"
+                    for item in incomplete
+                )
+                issue_ids = [item["issue_iid"] for item in incomplete]
+
+                # 构建详细的操作指引，包含评论区直达链接
+                pending_actions = []
+                for item in incomplete:
+                    actions = []
+                    if item['product_verdict'] != 'pass':
+                        actions.append("产品需评论：`product:pass`")
+                    if item['developer_verdict'] != 'pass':
+                        actions.append("研发需评论：`developer:pass`")
+                    if actions:
+                        # Issue 评论区链接：在 Issue URL 后加 #note_xxx 或直接跳转
+                        comment_url = f"{item['issue_url']}#notes"
+                        pending_actions.append(
+                            f"> **Issue #{item['issue_iid']}**：{' 且 '.join(actions)}\n"
+                            f"> [点击进入评论区]({comment_url})"
+                        )
+
+                action_guide = "\n".join(pending_actions)
+
+                content = (
+                    f"### ⚠️ 上线 MR 创建，但 pre 验收未完成\n"
+                    f"> **MR !{mr_iid}**：{mr_title}\n"
+                    f"> **操作人**：{author_name}（`{author_username}`）\n"
+                    f"> [查看 MR]({mr_url})\n\n"
+                    f"**验收状态**\n"
+                    f"{issue_lines}\n\n"
+                    f"**下一步操作**\n"
+                    f"{action_guide}\n\n"
+                    f"**说明**\n"
+                    f"> - 验收完成前，GitLab 页面的 Merge 按钮将被禁用\n"
+                    f"> - 发布验收口令后，系统会自动更新 MR 状态\n"
+                    f"> - 双方都通过后，Merge 按钮自动解锁"
+                )
+                at_mobiles = list(dict.fromkeys(config.tl_mobiles + config.resolve_wechat_ids([author_username])))
+                logger.warning("Release MR !%s created but incomplete pre verifications: %s", mr_iid, issue_ids)
+                state.record_violation(
+                    operator=author_username, operator_name=author_name,
+                    violation_type="mr_release_unverified",
+                    description=f"MR !{mr_iid}「{mr_title}」上线前 pre 验收未完成，涉及 Issue: {issue_ids}",
+                    project=project_name,
+                    detail={"mr_iid": mr_iid, "incomplete_issues": issue_ids, "mr_url": mr_url},
+                )
+                send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
+                violations_found = True
+
     # 功能分支直接合入 main，跳过 pre
-    if source_branch.startswith("issue_") and target_branch == config.main_branch:
+    if _is_feature_branch(source_branch) and target_branch == config.main_branch:
         content = (
             f"### ⚠️ 功能分支直接合入 {target_branch}，违反上线流程\n"
             f"> **MR !{mr_iid}**：{mr_title}\n"
@@ -475,20 +642,47 @@ def _on_mr_open(
         violations_found = True
 
     # feature/hotfix MR 缺少 Closes #xxx（未通过 ccg mr create 创建）
-    if source_branch.startswith(("issue_", "hotfix_")):
+    if _is_feature_or_hotfix_branch(source_branch):
         mr_description = attrs.get("description") or ""
         if not _CLOSES_RE.search(mr_description):
+            # 设置 Commit Status 阻止合并（对 pre 和 main 都生效，防止绕过验收）
+            is_to_pre = target_branch == config.pre_branch
+            is_to_main = target_branch in (config.main_branch, "master")
+
+            if (is_to_pre or is_to_main) and config.gitlab_client and project_id:
+                commit_sha = attrs.get("last_commit", {}).get("id") if isinstance(attrs.get("last_commit"), dict) else None
+                if not commit_sha:
+                    commit_sha = attrs.get("sha")
+
+                if commit_sha:
+                    config.gitlab_client.set_commit_status(
+                        project_id=project_id,
+                        commit_sha=commit_sha,
+                        state="failed",
+                        name="issue-reference-check",
+                        description="MR 描述缺少 Closes #xxx 引用",
+                        target_url=mr_url,
+                    )
+                    logger.info("Set commit status failed for MR !%s: missing Closes reference", mr_iid)
+
             content = (
                 f"### ⚠️ MR 未关联 Issue（缺少 Closes #xxx）\n"
                 f"> **MR !{mr_iid}**：{mr_title}\n"
                 f"> **操作人**：{author_name}（`{author_username}`）\n"
                 f"> `{source_branch}` → `{target_branch}`\n"
                 f"> [查看 MR]({mr_url})\n\n"
-                f"**注意**：MR 描述中未找到 `Closes #xxx` 引用，可能未通过 `ccg gitlab mr create` 创建。"
-                f"缺少关联将导致 Issue 无法自动关闭，且上线时无法追踪验收状态。"
+                f"**问题**\n"
+                f"> MR 描述中未找到 `Closes #xxx` 引用，可能未通过 `ccg gitlab mr create` 创建\n\n"
+                f"**影响**\n"
+                f"> - Issue 无法自动关闭\n"
+                f"> - 上线时无法追踪验收状态\n"
+                + (f"> - **GitLab 页面 Merge 按钮已被禁用**\n\n" if (is_to_pre or is_to_main) else "\n")
+                + f"**下一步 · {author_name}**\n"
+                f"> 请编辑 MR 描述，添加 `Closes #<issue_id>` 引用"
+                + (f"\n> 添加后系统会自动解除合并限制" if (is_to_pre or is_to_main) else "")
             )
             at_mobiles = list(dict.fromkeys(config.tl_mobiles + config.resolve_wechat_ids([author_username])))
-            logger.warning("MR !%s missing Closes ref source=%s author=%s project=%s", mr_iid, source_branch, author_username, project_name)
+            logger.warning("MR !%s missing Closes ref source=%s target=%s author=%s project=%s", mr_iid, source_branch, target_branch, author_username, project_name)
             state.record_violation(
                 operator=author_username, operator_name=author_name,
                 violation_type="mr_missing_closes_ref",
@@ -499,7 +693,7 @@ def _on_mr_open(
             send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
             violations_found = True
 
-        expected_prefix = "[需求]" if source_branch.startswith("issue_") else "[Bug热修]"
+        expected_prefix = "[需求]" if _is_feature_branch(source_branch) else "[Bug热修]"
         if not mr_title.startswith(expected_prefix):
             content = (
                 f"### ⚠️ MR 标题不符规范（可能未通过 ccg 创建）\n"
@@ -507,7 +701,7 @@ def _on_mr_open(
                 f"> **操作人**：{author_name}（`{author_username}`）\n"
                 f"> `{source_branch}` → `{target_branch}`\n"
                 f"> [查看 MR]({mr_url})\n\n"
-                f"**注意**：{'需求' if source_branch.startswith('issue_') else '热修'} MR 标题应以 `{expected_prefix}` 开头，"
+                f"**注意**：{'需求' if _is_feature_branch(source_branch) else '热修'} MR 标题应以 `{expected_prefix}` 开头，"
                 f"请确认是否通过 `ccg gitlab mr create` 创建。"
             )
             at_mobiles = list(dict.fromkeys(config.tl_mobiles + config.resolve_wechat_ids([author_username])))
@@ -522,47 +716,71 @@ def _on_mr_open(
             send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
             violations_found = True
 
-    # 上线 MR（pre → main），检查 pre 双向验收是否完成
-    if source_branch == config.pre_branch and target_branch == config.main_branch:
-        if config.gitlab_client is None:
-            logger.warning("GitLab client not configured, skipping pre verification check for MR !%s", mr_iid)
-        else:
-            project_id = (payload.get("project") or {}).get("id")
-            try:
-                incomplete = config.gitlab_client.check_pre_verification_status(project_id, config.pre_branch)
-            except Exception as e:
-                logger.warning("Pre verification check failed for MR !%s: %s", mr_iid, e)
-                incomplete = []
-            if incomplete:
-                _verdict_label = {"pass": "✓ 已通过", "reject": "✗ 已拒绝", "pending": "✗ 未验收"}
-                issue_lines = "\n".join(
-                    f"> **Issue #{item['issue_iid']}**：[{item['issue_title']}]({item['issue_url']})\n"
-                    f">   产品：{_verdict_label[item['product_verdict']]}　　"
-                    f"研发：{_verdict_label[item['developer_verdict']]}"
-                    for item in incomplete
-                )
-                issue_ids = [item["issue_iid"] for item in incomplete]
-                content = (
-                    f"### ⚠️ 上线 MR 创建，但 pre 验收未完成\n"
-                    f"> **MR !{mr_iid}**：{mr_title}\n"
-                    f"> **操作人**：{author_name}（`{author_username}`）\n"
-                    f"> [查看 MR]({mr_url})\n\n"
-                    f"{issue_lines}\n\n"
-                    f"**注意**：上线前需 `product:pass` 和 `developer:pass` 双方均通过，请确认后再合并。"
-                )
-                at_mobiles = list(dict.fromkeys(config.tl_mobiles + config.resolve_wechat_ids([author_username])))
-                logger.warning("Release MR !%s created but incomplete pre verifications: %s", mr_iid, issue_ids)
-                state.record_violation(
-                    operator=author_username, operator_name=author_name,
-                    violation_type="mr_release_unverified",
-                    description=f"MR !{mr_iid}「{mr_title}」上线前 pre 验收未完成，涉及 Issue: {issue_ids}",
-                    project=project_name,
-                    detail={"mr_iid": mr_iid, "incomplete_issues": issue_ids, "mr_url": mr_url},
-                )
-                send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
-                violations_found = True
-
     return "ok" if violations_found else "ignored"
+
+
+def _on_mr_update(
+    payload: dict[str, Any],
+    attrs: dict[str, Any],
+    config: Config,
+) -> str:
+    """处理 MR 更新事件，主要检查 description 是否补充了 Closes #xxx。"""
+    changes = payload.get("changes", {})
+    if "description" not in changes:
+        return "ignored"
+
+    mr_iid = attrs.get("iid", "?")
+    source_branch: str = attrs.get("source_branch", "")
+    target_branch: str = attrs.get("target_branch", "")
+
+    # 只处理 feature/hotfix → pre 的 MR
+    if not _is_feature_or_hotfix_branch(source_branch):
+        return "ignored"
+    if target_branch != config.pre_branch:
+        return "ignored"
+
+    project = payload.get("project", {}) or {}
+    project_id = project.get("id")
+
+    if not config.gitlab_client or not project_id:
+        return "ignored"
+
+    mr_description = attrs.get("description") or ""
+    mr_url = attrs.get("url", "")
+
+    # 检查更新后的 description 是否包含 Closes #xxx
+    has_closes = _CLOSES_RE.search(mr_description)
+
+    commit_sha = attrs.get("last_commit", {}).get("id") if isinstance(attrs.get("last_commit"), dict) else None
+    if not commit_sha:
+        commit_sha = attrs.get("sha")
+
+    if not commit_sha:
+        return "ignored"
+
+    if has_closes:
+        # 补充了 Closes #xxx，更新状态为 success
+        config.gitlab_client.set_commit_status(
+            project_id=project_id,
+            commit_sha=commit_sha,
+            state="success",
+            name="issue-reference-check",
+            description="✓ MR 已关联 Issue",
+        )
+        logger.info("MR !%s description updated with Closes reference, status set to success", mr_iid)
+    else:
+        # 仍然缺少 Closes #xxx，保持 failed
+        config.gitlab_client.set_commit_status(
+            project_id=project_id,
+            commit_sha=commit_sha,
+            state="failed",
+            name="issue-reference-check",
+            description="MR 描述缺少 Closes #xxx 引用",
+            target_url=mr_url,
+        )
+        logger.info("MR !%s description updated but still missing Closes reference", mr_iid)
+
+    return "ok"
 
 
 def _on_mr_merged(
@@ -588,7 +806,7 @@ def _on_mr_merged(
                 )
         return "ignored"
 
-    if not source_branch.startswith(("issue_", "hotfix_")):
+    if not _is_feature_or_hotfix_branch(source_branch):
         return "ignored"
 
     if config.gitlab_client is None:
@@ -603,14 +821,14 @@ def _on_mr_merged(
     author_name = user.get("name", "")
     author_username = user.get("username", "")
 
-    is_hotfix_to_main = source_branch.startswith("hotfix_") and target_branch == config.main_branch
+    is_hotfix_to_main = _is_hotfix_branch(source_branch) and target_branch == config.main_branch
     required = config.hotfix_required_approvals if is_hotfix_to_main else 1
 
     approvals = config.gitlab_client.get_mr_approvals(project_id, mr_iid)
     approved_count = len(approvals.get("approved_by") or [])
 
     if approved_count < required:
-        type_label = "热修" if source_branch.startswith("hotfix_") else "需求"
+        type_label = "热修" if _is_hotfix_branch(source_branch) else "需求"
         content = (
             f"### ⚠️ {type_label} MR 审批不足即合并（绕过 ccg 门禁）\n"
             f"> **MR !{mr_iid}**：{mr_title}\n"
@@ -663,6 +881,10 @@ def handle_mr_event(payload: dict[str, Any], config: Config) -> str:
     if action == "merge":
         return _on_mr_merged(payload, attrs, config)
 
+    if action == "update":
+        # MR description 更新，检查是否补充了 Closes #xxx
+        return _on_mr_update(payload, attrs, config)
+
     if action != "approved":
         logger.info("MR event action=%s, ignored", action)
         return "ignored"
@@ -708,8 +930,8 @@ def handle_mr_event(payload: dict[str, Any], config: Config) -> str:
     )
 
     # 判断 MR 类型
-    is_feature = source_branch.startswith("issue_")
-    is_hotfix = source_branch.startswith("hotfix_")
+    is_feature = _is_feature_branch(source_branch)
+    is_hotfix = _is_hotfix_branch(source_branch)
     is_release = source_branch == config.pre_branch
     is_sync_pre = source_branch == config.main_branch and target_branch == config.pre_branch
 
@@ -794,6 +1016,11 @@ def handle_mr_event(payload: dict[str, Any], config: Config) -> str:
         )
 
     send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
+
+    # 如果是热修 MR (hotfix_* → main)，更新 Commit Status
+    if is_hotfix and target_branch == config.main_branch:
+        _update_hotfix_mr_status(config, payload, attrs)
+
     return "ok"
 
 
@@ -845,6 +1072,7 @@ def handle_note_event(payload: dict[str, Any], config: Config) -> str:
 
     project = payload.get("project", {}) or {}
     project_name = project.get("name", "")
+    project_id = project.get("id")
 
     user = payload.get("user", {}) or {}
     commenter_name = user.get("name", "")
@@ -865,6 +1093,9 @@ def handle_note_event(payload: dict[str, Any], config: Config) -> str:
 
     verdict_match = _VERDICT_PATTERN.search(normalized_body)
     if verdict_match:
+        # 验收口令发生变化，检查是否需要更新相关 MR 的 Commit Status
+        _update_related_mr_status(config, project_id, issue_iid)
+
         # 去掉口令本身，其余文字作为理由/备注传给通知
         reason = _VERDICT_PATTERN.sub("", normalized_body)
         reason = re.sub(r"[ \t]{2,}", " ", reason)   # 合并口令被删后留下的多余空格
@@ -906,6 +1137,115 @@ def handle_note_event(payload: dict[str, Any], config: Config) -> str:
     )
     send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
     return "ok"
+
+
+def _update_related_mr_status(config: Config, project_id: int, issue_iid: int) -> None:
+    """当 Issue 验收状态变化时，更新相关上线 MR 的 Commit Status。"""
+    if not config.gitlab_client or not project_id:
+        return
+
+    try:
+        # 查找 pre → main 的开放 MR
+        mrs = config.gitlab_client._request(
+            "GET",
+            f"/projects/{project_id}/merge_requests",
+            params={
+                "state": "opened",
+                "source_branch": config.pre_branch,
+                "target_branch": config.main_branch,
+            },
+        )
+        if not mrs:
+            return
+
+        # 检查当前验收状态
+        incomplete = config.gitlab_client.check_pre_verification_status(project_id, config.pre_branch)
+
+        for mr in mrs:
+            mr_iid = mr.get("iid")
+            commit_sha = mr.get("sha")
+            if not commit_sha:
+                continue
+
+            if incomplete:
+                # 仍有未完成的验收
+                issue_ids = [item["issue_iid"] for item in incomplete]
+                description = f"验收未完成：Issue {issue_ids} 需要 product:pass 和 developer:pass"
+                config.gitlab_client.set_commit_status(
+                    project_id=project_id,
+                    commit_sha=commit_sha,
+                    state="failed",
+                    name="pre-acceptance-check",
+                    description=description[:255],
+                )
+                logger.info("Updated MR !%s status to failed due to incomplete acceptance", mr_iid)
+            else:
+                # 所有验收已完成
+                config.gitlab_client.set_commit_status(
+                    project_id=project_id,
+                    commit_sha=commit_sha,
+                    state="success",
+                    name="pre-acceptance-check",
+                    description="所有 Issue 验收已完成",
+                )
+                logger.info("Updated MR !%s status to success, all acceptance completed", mr_iid)
+
+    except Exception as e:
+        logger.warning("Failed to update related MR status for issue #%s: %s", issue_iid, e)
+
+
+def _update_hotfix_mr_status(config: Config, payload: dict[str, Any], attrs: dict[str, Any]) -> None:
+    """热修 MR 获得新 Approve 时，更新 Commit Status。"""
+    if not config.gitlab_client:
+        return
+
+    project = payload.get("project", {}) or {}
+    project_id = project.get("id")
+    if not project_id:
+        return
+
+    mr_iid = attrs.get("iid")
+    mr_url = attrs.get("url", "")
+    commit_sha = attrs.get("last_commit", {}).get("id") if isinstance(attrs.get("last_commit"), dict) else None
+    if not commit_sha:
+        commit_sha = attrs.get("sha")
+
+    if not commit_sha or not mr_iid:
+        return
+
+    try:
+        # 查询当前 Approve 数量
+        approvals_data = config.gitlab_client.get_mr_approvals(project_id, mr_iid)
+        approved_by = approvals_data.get("approved_by") or []
+        current_approvals = len(approved_by)
+        required_approvals = config.hotfix_required_approvals
+
+        if current_approvals < required_approvals:
+            # Approve 仍不足 → 保持 failed
+            description = f"需要 {required_approvals} 人 Approve，当前 {current_approvals} 人"
+            config.gitlab_client.set_commit_status(
+                project_id=project_id,
+                commit_sha=commit_sha,
+                state="failed",
+                name="hotfix-approval-check",
+                description=description,
+                target_url=mr_url,
+            )
+            logger.info("Updated hotfix MR !%s status to failed: %s/%s approvals", mr_iid, current_approvals, required_approvals)
+        else:
+            # Approve 已满足 → 更新为 success
+            description = f"✓ 已获得 {current_approvals} 人 Approve，满足要求"
+            config.gitlab_client.set_commit_status(
+                project_id=project_id,
+                commit_sha=commit_sha,
+                state="success",
+                name="hotfix-approval-check",
+                description=description,
+            )
+            logger.info("Updated hotfix MR !%s status to success: %s approvals", mr_iid, current_approvals)
+
+    except Exception as e:
+        logger.warning("Failed to update hotfix MR !%s status: %s", mr_iid, e)
 
 
 def _handle_verdict_comment(
@@ -1028,7 +1368,7 @@ def handle_push_event(payload: dict[str, Any], config: Config) -> str:
     notified = False
 
     # 强制推送：个人功能/热修分支 rebase 后 ccg 会 force-with-lease，属正常操作，跳过
-    if is_force and branch.startswith(("issue_", "hotfix_")):
+    if is_force and _is_feature_or_hotfix_branch(branch):
         logger.info("Force push to feature/hotfix branch %s (likely post-rebase), skipped", branch)
     elif is_force:
         content = (

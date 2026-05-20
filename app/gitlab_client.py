@@ -27,12 +27,17 @@ class GitLabClient:
         self._base = url.rstrip("/") + "/api/v4"
         self._token = token
 
-    def _request(self, method: str, path: str, params: Optional[dict] = None) -> Any:
+    def _request(self, method: str, path: str, params: Optional[dict] = None, data: Optional[dict] = None) -> Any:
         url = f"{self._base}{path}"
         if params:
             url += "?" + urllib.parse.urlencode(params)
-        req = urllib.request.Request(url, method=method)
+
+        body = json.dumps(data).encode("utf-8") if data else None
+        req = urllib.request.Request(url, data=body, method=method)
         req.add_header("PRIVATE-TOKEN", self._token)
+        if body:
+            req.add_header("Content-Type", "application/json")
+
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 raw = resp.read().decode("utf-8")
@@ -150,6 +155,55 @@ class GitLabClient:
                 })
 
         return incomplete
+
+    def set_commit_status(
+        self,
+        project_id: int,
+        commit_sha: str,
+        state: str,
+        name: str = "acceptance-check",
+        description: str = "",
+        target_url: str = "",
+    ) -> bool:
+        """设置 commit 的状态，用于 MR 合并门禁。
+
+        Args:
+            project_id: 项目 ID
+            commit_sha: commit SHA
+            state: 状态，可选值：pending, running, success, failed, canceled
+            name: 状态名称，会显示在 GitLab MR 页面
+            description: 状态描述
+            target_url: 点击状态时跳转的 URL
+
+        Returns:
+            成功返回 True，失败返回 False
+        """
+        data = {
+            "state": state,
+            "name": name,
+        }
+        if description:
+            data["description"] = description
+        if target_url:
+            data["target_url"] = target_url
+
+        try:
+            self._request(
+                "POST",
+                f"/projects/{project_id}/statuses/{commit_sha}",
+                data=data,
+            )
+            logger.info(
+                "Set commit status project=%s sha=%s state=%s name=%s",
+                project_id, commit_sha[:8], state, name,
+            )
+            return True
+        except GitLabError as e:
+            logger.error(
+                "Failed to set commit status project=%s sha=%s state=%s: %s",
+                project_id, commit_sha[:8], state, e,
+            )
+            return False
 
     @staticmethod
     def _latest_verdict(notes: list[dict], role: str, since_time: str = "") -> str:

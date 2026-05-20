@@ -2,7 +2,49 @@
 
 GitLab Webhook 接收服务，将 GitLab 事件转化为企业微信群消息，驱动研发协作工作流中的各个通知节点，同时对违规操作进行实时告警并持久化记录。
 
+**新增功能**：通过 GitLab Commit Status API 实现 **MR 合并门禁**，验收未完成时自动阻止上线 MR 合并。
+
 ## 功能概览
+
+### MR 合并门禁（External Status Check）
+
+通过 GitLab Commit Status API 实现多重合并门禁，确保代码质量和流程规范。**所有门禁都无法在 GitLab 页面绕过**，即使不使用 `ccg` 命令也会生效。
+
+#### 1. 上线 MR 验收门禁（`pre` → `main`）
+
+自动检查 pre 分支上**所有已合并 MR** 关联的 Issue 验收状态：
+- **检查范围**：遍历 pre 上所有已合并的 MR，提取 `Closes #xxx` 关联的所有 Issue
+- **验收要求**：每个 Issue 必须同时完成 `product:pass` 和 `developer:pass`（验收口令必须在 MR 合入 pre 之后发布）
+- **验收未完成**：设置 Commit Status 为 `failed`，GitLab 页面无法点击 Merge 按钮
+- **验收已完成**：设置 Commit Status 为 `success`，允许合并
+- **实时更新**：当 Issue 评论中出现验收口令时，自动更新相关上线 MR 的状态
+
+#### 2. 热修 MR 审批门禁（`hotfix_*`/`hotfix/*` → `main`）
+
+自动检查 Approve 数量：
+- **Approve 不足**：设置 Commit Status 为 `failed`，阻止合并（默认需要 2 人）
+- **Approve 已满足**：设置 Commit Status 为 `success`，允许合并
+- **实时更新**：每次获得新 Approve 时自动更新状态
+
+#### 3. Issue 关联门禁（`issue_*`/`hotfix_*`/`feature/*`/`hotfix/*` → `pre`/`main`）
+
+强制要求所有功能/热修分支的 MR 必须关联 Issue：
+- **适用范围**：所有功能分支和热修分支合入 `pre` 或 `main` 时
+- **检查内容**：MR 描述必须包含 `Closes #xxx` 引用
+- **缺少引用**：设置 Commit Status 为 `failed`，阻止合并
+- **已添加引用**：设置 Commit Status 为 `success`，允许合并
+- **自动更新**：编辑 MR 描述补充引用后自动解除限制
+- **防绕过**：即使功能分支直接合入 main（违规操作），也必须有 Issue 关联才能追踪验收状态
+
+#### 防绕过机制
+
+| 绕过尝试 | 是否被阻止 | 说明 |
+|---------|-----------|------|
+| 功能分支直接合入 main（跳过 pre） | ✅ 阻止 | Issue 关联门禁生效 + 违规告警 |
+| MR 不写 `Closes #xxx` | ✅ 阻止 | Issue 关联门禁对 pre/main 都生效 |
+| 验收未完成就上线 | ✅ 阻止 | 上线 MR 验收门禁检查所有 Issue |
+| 热修 Approve 不足就合并 | ✅ 阻止 | 热修审批门禁生效 |
+| 在 GitLab 页面直接点 Merge | ✅ 阻止 | 所有门禁都通过 Commit Status 实现 |
 
 ### 工作流通知
 
@@ -167,6 +209,8 @@ bash service.sh status   # 查看状态
 
 ## GitLab 配置
 
+### 1. 添加 Webhook
+
 在 GitLab 项目的 **Settings → Webhooks** 中添加：
 
 - **URL**：`http://<your-server>:<port>/gitlab/webhook`
@@ -176,18 +220,121 @@ bash service.sh status   # 查看状态
 | Webhook 事件 | 覆盖功能 |
 |-------------|---------|
 | `Issues events` | Issue 创建/重开通知、格式校验（含 assignee）、assignee 变更时重新校验模板并通知、description 补全后通知研发认领、Issue 关闭违规（无人认领、未双方验收、负责人全部移除） |
-| `Merge request events` | MR 创建违规检测（缺 `Closes #xxx`、标题不规范、功能分支直合 main、pre 验收未完成）、MR Approve 通知、MR 合并违规检测（Approve 不足） |
-| `Comments` | Issue 评论中 `product:pass/reject`、`developer:pass/reject` 验收口令自动通知；普通评论转发给 assignee |
+| `Merge request events` | MR 创建违规检测（缺 `Closes #xxx`、标题不规范、功能分支直合 main、pre 验收未完成）、MR Approve 通知、MR 合并违规检测（Approve 不足）、**MR 合并门禁（Commit Status）** |
+| `Comments` | Issue 评论中 `product:pass/reject`、`developer:pass/reject` 验收口令自动通知；普通评论转发给 assignee；**验收状态变化时自动更新 MR Commit Status** |
 | `Push events` | 直接 push 受保护分支告警、Force Push 告警（`issue_*`/`hotfix_*` 分支除外） |
+
+### 2. 启用 Merge Checks（必需，用于合并门禁）
+
+在 GitLab 项目的 **Settings → Merge requests → Merge checks** 中：
+
+- ✅ 勾选 **Pipelines must succeed**
+
+这样当 Commit Status 为 `failed` 时，GitLab 会阻止合并操作。
+
+**注意**：
+- 如果项目已配置 CI/CD Pipeline，Commit Status 和 Pipeline 状态都必须通过才能合并
+- 如果项目没有 Pipeline，只检查 Commit Status
+- Commit Status 名称为 `pre-acceptance-check`，会显示在 MR 页面的 "Checks" 区域
+
+### 3. 配置 Protected Branches（推荐）
+
+在 **Settings → Repository → Protected branches** 中：
+
+- 保护 `main` 和 `pre` 分支
+- **Allowed to merge**：设置为 `Maintainers` 或更严格的角色
+- **Allowed to push**：设置为 `No one`（强制通过 MR 合并）
+
+这样可以防止直接 push 到保护分支，配合 Webhook 的违规检测形成双重保障。
+
+## 合并门禁工作流程
+
+### 1. 上线 MR 验收门禁（pre → main）
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 研发创建上线 MR (pre → main)                                  │
+│    ↓                                                         │
+│    Webhook 触发 → 检查所有 Issue 验收状态                     │
+│    ├─ 未完成 → Commit Status = failed (阻止合并)             │
+│    └─ 已完成 → Commit Status = success (允许合并)            │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│ 产品/研发在 Issue 评论区发布验收口令                          │
+│    ↓                                                         │
+│    Webhook 触发 → 重新检查验收状态 → 更新 Commit Status      │
+│    ├─ 双方都 pass → Status = success (解除阻止)              │
+│    └─ 任一方 reject/pending → Status = failed (继续阻止)     │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 2. 热修 MR 审批门禁（hotfix_* → main）
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 研发创建热修 MR (hotfix_* → main)                            │
+│    ↓                                                         │
+│    Webhook 触发 → 检查当前 Approve 数量                       │
+│    ├─ 不足 2 人 → Commit Status = failed (阻止合并)          │
+│    └─ 已满足 → Commit Status = success (允许合并)            │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│ Reviewer 点击 Approve                                        │
+│    ↓                                                         │
+│    Webhook 触发 → 重新检查 Approve 数量 → 更新 Commit Status │
+│    ├─ 仍不足 → Status = failed (继续阻止)                    │
+│    └─ 已满足 → Status = success (解除阻止)                   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 3. Issue 关联门禁（issue_*/hotfix_* → pre/main）
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 研发创建功能/热修 MR (issue_*/hotfix_* → pre/main)          │
+│    ↓                                                         │
+│    Webhook 触发 → 检查 MR 描述是否包含 Closes #xxx           │
+│    ├─ 缺少引用 → Commit Status = failed (阻止合并)           │
+│    └─ 已关联 → Commit Status = success (允许合并)            │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│ 研发编辑 MR 描述，补充 Closes #xxx                            │
+│    ↓                                                         │
+│    Webhook 触发 → 检测到引用 → 更新 Commit Status            │
+│    └─ Status = success (解除阻止)                            │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### 3. Issue 关联门禁（功能/热修分支 → pre/main）
+
+**说明**：
+- 对 `pre` 和 `main` 分支都生效，防止绕过验收检查
+- 功能分支直接合入 `main` 虽然违规，但仍需要 Issue 关联才能追踪验收状态
+- 支持新旧分支格式：`issue_*`、`hotfix_*`、`feature/*`、`hotfix/*`
+
+**优势**：
+- ✅ 即使不使用 `ccg gitlab mr merge`，也无法绕过这些检查
+- ✅ 状态实时同步到 GitLab MR 页面
+- ✅ 用户能清楚看到当前阻塞原因
+- ✅ 满足条件后自动解除阻止，无需手动操作
+- ✅ 强制规范流程，防止遗漏验收或缺少 Issue 关联
 
 ## 分支命名约定
 
-| 分支前缀 | 类型 |
-|---------|-----|
-| `issue_<id>` | 需求/优化功能分支 |
-| `hotfix_<id>` | 线上热修分支 |
-| `pre` | 预发布分支（上线 MR 源分支） |
-| `main` / `master` | 主干 |
+| 分支格式 | 类型 | 示例 |
+|---------|-----|------|
+| `feature/<id>-<desc>` | 需求/优化功能分支 | `feature/123-user-login` |
+| `hotfix/<id>-<desc>` | 线上热修分支 | `hotfix/456-payment-fix` |
+| `pre` | 预发布分支（上线 MR 源分支） | `pre` |
+| `main` / `master` | 主干 | `main` |
+
+**说明**：
+- `<id>` 为 Issue ID
+- `<desc>` 为简短英文描述，自动从 Issue 标题生成，只包含字母、数字、`-`
+- 旧格式 `issue_<id>` 和 `hotfix_<id>` 仍然兼容，但推荐使用新格式
 
 ## 项目结构
 
@@ -195,9 +342,9 @@ bash service.sh status   # 查看状态
 app/
 ├── main.py            # FastAPI 应用入口、请求日志中间件、热修同步后台定时任务
 ├── webhook.py         # Webhook 路由：校验 Token、分发事件、违规查询、手动触发热修检查
-├── handlers.py        # 业务逻辑：Issue / MR / Note / Push 事件处理 + 热修同步检查函数
+├── handlers.py        # 业务逻辑：Issue / MR / Note / Push 事件处理 + 热修同步检查函数 + MR 合并门禁
 ├── config.py          # 配置加载（config.yaml + 环境变量），初始化 GitLabClient
-├── gitlab_client.py   # GitLab API 客户端（Issue / Note / MR 查询）
+├── gitlab_client.py   # GitLab API 客户端（Issue / Note / MR 查询 + Commit Status 设置）
 ├── wechat.py          # 企业微信 Webhook 发送
 ├── state.py           # SQLite 持久化：violations 违规记录 + hotfix_sync_pending 待同步记录
 └── logger.py          # 结构化日志
@@ -205,3 +352,114 @@ service.sh             # 进程管理脚本（start/stop/restart/status，优雅
 requirements.txt       # Python 依赖
 config.yaml.example    # 配置模板
 ```
+
+## 技术实现细节
+
+### Commit Status API
+
+使用 GitLab 的 [Commit Status API](https://docs.gitlab.com/ee/api/commits.html#post-the-build-status-to-a-commit) 设置 MR 的合并门禁：
+
+```python
+POST /api/v4/projects/:id/statuses/:sha
+{
+  "state": "success",  # pending, running, success, failed, canceled
+  "name": "pre-acceptance-check",  # 或 hotfix-approval-check, issue-reference-check
+  "description": "所有 Issue 验收已完成"
+}
+```
+
+### 三种门禁的触发时机
+
+#### 1. 上线 MR 验收门禁（`pre-acceptance-check`）
+
+**触发时机**：
+- **MR 创建时**（`merge_request` event, action=`open`）
+  - 检查验收状态
+  - 设置初始 Commit Status
+
+- **Issue 评论时**（`note` event）
+  - 检测到 `product:pass/reject` 或 `developer:pass/reject`
+  - 查找相关的开放上线 MR
+  - 重新检查验收状态
+  - 更新 Commit Status
+
+**状态判断逻辑**：
+- **所有 Issue** 的 `product:pass` 和 `developer:pass` 都存在 → `success`
+- **任一 Issue** 缺少验收或被 reject → `failed`
+- 验收口令必须在 MR 合入 `pre` **之后**发布才有效
+
+#### 2. 热修 MR 审批门禁（`hotfix-approval-check`）
+
+**触发时机**：
+- **MR 创建时**（`merge_request` event, action=`open`）
+  - 检查当前 Approve 数量
+  - 设置初始 Commit Status
+
+- **MR 获得 Approve 时**（`merge_request` event, action=`approved`）
+  - 重新查询 Approve 数量
+  - 更新 Commit Status
+
+**状态判断逻辑**：
+- Approve 数量 >= `hotfix_required_approvals`（默认 2） → `success`
+- Approve 数量 < 要求 → `failed`
+
+#### 3. Issue 关联门禁（`issue-reference-check`）
+
+**触发时机**：
+- **MR 创建时**（`merge_request` event, action=`open`）
+  - 检查 MR description 是否包含 `Closes #xxx`
+  - 设置初始 Commit Status
+
+- **MR 描述更新时**（`merge_request` event, action=`update`）
+  - 检测 description 变化
+  - 重新检查是否包含 `Closes #xxx`
+  - 更新 Commit Status
+
+**状态判断逻辑**：
+- MR description 包含 `Closes #xxx` → `success`
+- 缺少 Issue 引用 → `failed`
+- **仅对 `issue_*`/`hotfix_*` → `pre` 的 MR 生效**
+
+### Issue 关联逻辑
+
+上线 MR 通过以下方式关联 Issue：
+
+1. 查询所有已合并到 `pre` 分支的 MR
+2. 从每个 MR 的 `description` 中提取 `Closes #xxx` 引用
+3. 检查这些 Issue 的验收状态
+
+**为什么需要 Issue 关联门禁？**
+
+如果 MR 缺少 `Closes #xxx` 引用：
+- Issue 无法自动关闭
+- **上线时无法追踪该 Issue 的验收状态**（会被遗漏）
+- 可能导致未验收的功能直接上线
+
+通过在合入 `pre` 时强制要求 `Closes #xxx`，确保所有功能都能被正确追踪和验收。
+
+## 常见问题
+
+### Q: 为什么 MR 页面显示 "Merge blocked: Checks must pass"？
+
+A: 这是合并门禁生效的标志，说明验收未完成。查看 MR 页面的 "Checks" 区域，会显示具体原因（如 "验收未完成：Issue [123, 456] 需要 product:pass 和 developer:pass"）。
+
+### Q: 验收完成后 Merge 按钮还是禁用？
+
+A: 检查以下几点：
+1. 确认 Issue 评论中的验收口令格式正确（`product:pass` 和 `developer:pass`）
+2. 验收口令必须在 MR 合入 `pre` 之后发布
+3. 查看 Webhook 服务日志，确认收到了 Note 事件并成功更新了 Commit Status
+4. 刷新 MR 页面，GitLab 可能需要几秒钟同步状态
+
+### Q: 如何临时绕过合并门禁？
+
+A: 不建议绕过，但如果确实需要（如紧急情况）：
+1. 在 GitLab 项目设置中临时取消勾选 "Pipelines must succeed"
+2. 合并后立即重新勾选
+3. 这种操作会被记录在 GitLab 审计日志中
+
+### Q: 合并门禁会影响其他类型的 MR 吗？
+
+A: 不会。合并门禁只对上线 MR（`pre` → `main`）生效，其他 MR（如 `issue_*` → `pre`、`hotfix_*` → `main`）不受影响。
+
+
