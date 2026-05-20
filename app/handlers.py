@@ -1391,7 +1391,12 @@ def handle_push_event(payload: dict[str, Any], config: Config) -> str:
         notified = True
 
     # 直接推送到受保护分支（未经 MR）
-    if branch in {config.main_branch, config.pre_branch}:
+    # MR 合并也会触发 Push Hook，通过 commit message 中的 "See merge request" 标识排除
+    is_mr_merge = any(
+        "See merge request" in (c.get("message") or "")
+        for c in commits
+    )
+    if branch in {config.main_branch, config.pre_branch} and not is_mr_merge:
         content = (
             f"### ⚠️ 直接 Push 到受保护分支\n"
             f"> **项目**：{project_name}\n"
