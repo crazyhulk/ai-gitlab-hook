@@ -1427,10 +1427,12 @@ def handle_push_event(payload: dict[str, Any], config: Config) -> str:
         notified = True
 
     # 直接推送到受保护分支（未经 MR）
-    # MR 合并也会触发 Push Hook，通过 commit message 中的 "See merge request" 标识排除
-    is_mr_merge = any(
-        "See merge request" in (c.get("message") or "")
-        for c in commits
+    # MR 合并也会触发 Push Hook，通过以下方式排除：
+    # 1. merge commit 中包含 "See merge request"（普通 merge）
+    # 2. pusher 为 project bot（fast-forward/rebase merge 由 bot 执行）
+    is_mr_merge = (
+        any("See merge request" in (c.get("message") or "") for c in commits)
+        or "bot" in pusher_username
     )
     if branch in {config.main_branch, config.pre_branch} and not is_mr_merge:
         content = (
