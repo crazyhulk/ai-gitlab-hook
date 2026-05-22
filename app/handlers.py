@@ -17,6 +17,7 @@ logger = get_logger(__name__)
 _FEATURE_SECTIONS = ["需求背景", "功能详细描述", "验收标准", "优先级"]
 _IMPROVE_SECTIONS = ["优化背景", "现状问题", "优化方案", "预期收益", "优先级"]
 _BUG_SECTIONS = ["问题现象", "复现步骤", "预期正常结果", "实际异常结果", "出现环境", "严重等级"]
+_QUICKFIX_SECTIONS = ["变更说明", "影响范围", "验收标准", "优先级"]
 
 
 def _missing_sections(body: str, sections: list[str]) -> list[str]:
@@ -32,6 +33,8 @@ def _detect_issue_type(description: str) -> str | None:
         return "feature"
     if re.search(r"##\s*问题现象", body):
         return "bug"
+    if re.search(r"##\s*变更说明", body):
+        return "quickfix"
     return None
 
 
@@ -45,9 +48,14 @@ def _is_hotfix_branch(branch: str) -> bool:
     return branch.startswith("hotfix/") or branch.startswith("hotfix_")
 
 
+def _is_quickfix_branch(branch: str) -> bool:
+    """判断是否为快速迭代分支"""
+    return branch.startswith("quickfix/")
+
+
 def _is_feature_or_hotfix_branch(branch: str) -> bool:
-    """判断是否为功能或热修分支"""
-    return _is_feature_branch(branch) or _is_hotfix_branch(branch)
+    """判断是否为功能、热修或快速迭代分支"""
+    return _is_feature_branch(branch) or _is_hotfix_branch(branch) or _is_quickfix_branch(branch)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -85,7 +93,7 @@ def handle_issue_event(payload: dict[str, Any], config: Config) -> str:
     assignee_usernames = [a.get("username", "") for a in assignees if a.get("username")]
 
     issue_type = _detect_issue_type(description)
-    is_feature = issue_type in ("feature", "improve")
+    is_feature = issue_type in ("feature", "improve", "quickfix")
     is_bug = issue_type == "bug"
 
     logger.info(
@@ -122,7 +130,7 @@ def handle_issue_event(payload: dict[str, Any], config: Config) -> str:
                     )
                     notified = True
                 elif not (assignees_change.get("current") or []) and (assignees_change.get("previous") or []):
-                    type_label = "Bug" if is_bug else ("优化" if issue_type == "improve" else "需求")
+                    type_label = {"bug": "Bug", "improve": "优化", "quickfix": "快速迭代"}.get(issue_type or "", "需求")
                     content = (
                         f"### ⚠️ Issue 负责人被全部移除\n"
                         f"> **Issue #{issue_iid}**：{issue_title}\n"
@@ -159,8 +167,8 @@ def handle_issue_event(payload: dict[str, Any], config: Config) -> str:
 
     if action == "close":
         notified = False
-        if not assignees and issue_type in ("feature", "improve", "bug"):
-            type_label = {"bug": "Bug", "improve": "优化"}.get(issue_type or "", "需求")
+        if not assignees and issue_type in ("feature", "improve", "bug", "quickfix"):
+            type_label = {"bug": "Bug", "improve": "优化", "quickfix": "快速迭代"}.get(issue_type or "", "需求")
             content = (
                 f"### ⚠️ Issue 无人认领即关闭\n"
                 f"> **Issue #{issue_iid}**：{issue_title}\n"
@@ -182,14 +190,14 @@ def handle_issue_event(payload: dict[str, Any], config: Config) -> str:
             send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
             notified = True
 
-        if issue_type in ("feature", "improve") and assignees and config.gitlab_client:
+        if issue_type in ("feature", "improve", "quickfix") and assignees and config.gitlab_client:
             project_id = (payload.get("project") or {}).get("id")
             if project_id:
                 notes = config.gitlab_client.get_issue_notes(project_id, issue_iid)
                 product_verdict = config.gitlab_client._latest_verdict(notes, "product")
                 developer_verdict = config.gitlab_client._latest_verdict(notes, "developer")
                 if product_verdict != "pass" or developer_verdict != "pass":
-                    type_label = "优化" if issue_type == "improve" else "需求"
+                    type_label = {"improve": "优化", "quickfix": "快速迭代"}.get(issue_type, "需求")
                     _vl = {"pass": "已通过", "reject": "已拒绝", "pending": "未验收"}
                     pending_parts = []
                     if product_verdict != "pass":
@@ -238,8 +246,8 @@ def _on_feature_issue_open(
     reporter_name, reporter_username, assignee_names, assignee_usernames,
     issue_type: str = "feature",
 ) -> str:
-    sections = _IMPROVE_SECTIONS if issue_type == "improve" else _FEATURE_SECTIONS
-    type_label = "优化" if issue_type == "improve" else "需求"
+    sections = {"feature": _FEATURE_SECTIONS, "improve": _IMPROVE_SECTIONS, "quickfix": _QUICKFIX_SECTIONS}.get(issue_type, _FEATURE_SECTIONS)
+    type_label = {"improve": "优化", "quickfix": "快速迭代"}.get(issue_type, "需求")
     missing = _missing_sections(description, sections)
     if not assignee_usernames:
         missing.append("负责人（指派研发）")
@@ -338,16 +346,18 @@ def _on_issue_assignee_change(
     is_bug: bool,
     issue_type: str | None,
 ) -> None:
-    type_label = "Bug" if is_bug else ("优化" if issue_type == "improve" else "需求")
+    type_label = {"bug": "Bug", "improve": "优化", "quickfix": "快速迭代"}.get(issue_type or "", "需求")
     assignee_names = [a.get("name", "") for a in new_assignees if a.get("name")]
     assignee_usernames = [a.get("username", "") for a in new_assignees if a.get("username")]
     assignee_str = "、".join(assignee_names)
 
-    # 指派时同步校验模板，与 ccg feature/hotfix start 保持一致
+    # 指派时同步校验模板，与 ccg feature/hotfix/quickfix start 保持一致
     if is_bug:
         sections = _BUG_SECTIONS
     elif issue_type == "improve":
         sections = _IMPROVE_SECTIONS
+    elif issue_type == "quickfix":
+        sections = _QUICKFIX_SECTIONS
     else:
         sections = _FEATURE_SECTIONS
     missing = _missing_sections(description, sections)
@@ -397,6 +407,8 @@ def _on_issue_update(
         sections = _BUG_SECTIONS
     elif issue_type == "improve":
         sections = _IMPROVE_SECTIONS
+    elif issue_type == "quickfix":
+        sections = _QUICKFIX_SECTIONS
     else:
         sections = _FEATURE_SECTIONS
 
@@ -414,8 +426,13 @@ def _on_issue_update(
         return "ignored"
 
     # 变更前不合规 → 变更后合规 → 通知研发认领
-    cmd = f"ccg gitlab hotfix start {issue_iid}" if is_bug else f"ccg gitlab feature start {issue_iid}"
-    type_label = "Bug" if is_bug else ("优化" if issue_type == "improve" else "需求")
+    if is_bug:
+        cmd = f"ccg gitlab hotfix start {issue_iid}"
+    elif issue_type == "quickfix":
+        cmd = f"ccg gitlab quickfix start {issue_iid}"
+    else:
+        cmd = f"ccg gitlab feature start {issue_iid}"
+    type_label = {"bug": "Bug", "improve": "优化", "quickfix": "快速迭代"}.get(issue_type or "", "需求")
     assignee_str = "、".join(assignee_names) if assignee_names else "（待指派）"
     content = (
         f"### {type_label} Issue 格式已补全，可以认领\n"
@@ -693,15 +710,21 @@ def _on_mr_open(
             send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
             violations_found = True
 
-        expected_prefix = "[需求]" if _is_feature_branch(source_branch) else "[Bug热修]"
+        if _is_quickfix_branch(source_branch):
+            expected_prefix = "[快速迭代]"
+        elif _is_feature_branch(source_branch):
+            expected_prefix = "[需求]"
+        else:
+            expected_prefix = "[Bug热修]"
         if not mr_title.startswith(expected_prefix):
+            branch_label = "快速迭代" if _is_quickfix_branch(source_branch) else ("需求" if _is_feature_branch(source_branch) else "热修")
             content = (
                 f"### ⚠️ MR 标题不符规范（可能未通过 ccg 创建）\n"
                 f"> **MR !{mr_iid}**：{mr_title}\n"
                 f"> **操作人**：{author_name}（`{author_username}`）\n"
                 f"> `{source_branch}` → `{target_branch}`\n"
                 f"> [查看 MR]({mr_url})\n\n"
-                f"**注意**：{'需求' if _is_feature_branch(source_branch) else '热修'} MR 标题应以 `{expected_prefix}` 开头，"
+                f"**注意**：{branch_label} MR 标题应以 `{expected_prefix}` 开头，"
                 f"请确认是否通过 `ccg gitlab mr create` 创建。"
             )
             at_mobiles = list(dict.fromkeys(config.tl_mobiles + config.resolve_wechat_ids([author_username])))
@@ -828,7 +851,7 @@ def _on_mr_merged(
     approved_count = len(approvals.get("approved_by") or [])
 
     if approved_count < required:
-        type_label = "热修" if _is_hotfix_branch(source_branch) else "需求"
+        type_label = "热修" if _is_hotfix_branch(source_branch) else ("快速迭代" if _is_quickfix_branch(source_branch) else "需求")
         content = (
             f"### ⚠️ {type_label} MR 审批不足即合并（绕过 ccg 门禁）\n"
             f"> **MR !{mr_iid}**：{mr_title}\n"
@@ -932,12 +955,25 @@ def handle_mr_event(payload: dict[str, Any], config: Config) -> str:
     # 判断 MR 类型
     is_feature = _is_feature_branch(source_branch)
     is_hotfix = _is_hotfix_branch(source_branch)
+    is_quickfix = _is_quickfix_branch(source_branch)
     is_release = source_branch == config.pre_branch
     is_sync_pre = source_branch == config.main_branch and target_branch == config.pre_branch
 
     at_mobiles = config.resolve_wechat_ids(assignee_usernames)
 
-    if is_feature:
+    if is_quickfix:
+        content = (
+            f"### 快速迭代 MR 审批通过 ✓\n"
+            f"> **MR !{mr_iid}**：{mr_title}\n"
+            f"> **审批人**：{approver_name}\n"
+            f"> **合并目标**：`{target_branch}`\n"
+            f"> [查看 MR]({mr_url})\n\n"
+            f"**下一步 · {developer_label}**\n"
+            f"> 审批已通过，执行以下命令合并到 `{target_branch}`：\n"
+            f"> `ccg gitlab mr merge {mr_iid}`"
+        )
+
+    elif is_feature:
         content = (
             f"### 需求 MR 审批通过 ✓\n"
             f"> **MR !{mr_iid}**：{mr_title}\n"
@@ -1391,7 +1427,12 @@ def handle_push_event(payload: dict[str, Any], config: Config) -> str:
         notified = True
 
     # 直接推送到受保护分支（未经 MR）
-    if branch in {config.main_branch, config.pre_branch}:
+    # MR 合并也会触发 Push Hook，通过 commit message 中的 "See merge request" 标识排除
+    is_mr_merge = any(
+        "See merge request" in (c.get("message") or "")
+        for c in commits
+    )
+    if branch in {config.main_branch, config.pre_branch} and not is_mr_merge:
         content = (
             f"### ⚠️ 直接 Push 到受保护分支\n"
             f"> **项目**：{project_name}\n"
