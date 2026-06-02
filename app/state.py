@@ -145,6 +145,16 @@ def clear_hotfix_sync_pending(project_id: int) -> int:
         return cur.rowcount
 
 
+def list_pending_project_ids() -> list[int]:
+    """返回所有有待同步记录的 project_id 列表（去重）。"""
+    with _db_lock:
+        conn = _get_conn()
+        rows = conn.execute(
+            "SELECT DISTINCT project_id FROM hotfix_sync_pending"
+        ).fetchall()
+        return [row[0] for row in rows]
+
+
 def list_overdue_hotfix_syncs(threshold_hours: int = 4) -> list[dict]:
     """返回超时未同步的记录（created_at 距今超过 threshold_hours 小时）。"""
     with _db_lock:

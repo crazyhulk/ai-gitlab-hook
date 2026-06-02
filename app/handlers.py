@@ -1467,11 +1467,39 @@ def handle_push_event(payload: dict[str, Any], config: Config) -> str:
 # 热修同步检查（内部定时任务 + 手动触发接口共用）
 # ──────────────────────────────────────────────────────────────
 
+def _clear_synced_projects(config: Config) -> None:
+    """对有 pending 记录的项目，通过 compare API 检查 pre 是否已包含 main 的内容。
+
+    如果 main 相对 pre 没有多余的 commit（git log pre..main 为空），
+    说明 pre 已经 rebase 了 main，清除该项目的待同步记录。
+    """
+    if config.gitlab_client is None:
+        return
+    pending_pids = state.list_pending_project_ids()
+    for pid in pending_pids:
+        try:
+            result = config.gitlab_client.compare_branches(pid, config.pre_branch, config.main_branch)
+            if not result:
+                continue
+            commits = result.get("commits") or []
+            if len(commits) == 0:
+                cleared = state.clear_hotfix_sync_pending(pid)
+                logger.info(
+                    "Auto-cleared %s hotfix_sync_pending: pre already contains main (project_id=%s)",
+                    cleared, pid,
+                )
+        except Exception as exc:
+            logger.warning("Failed to compare branches for project_id=%s: %s", pid, exc)
+
+
 def run_hotfix_sync_check(config: Config) -> list[dict]:
     """检查热修合入 main 后超时未同步 pre 的记录，发送企微告警并写入违规记录。
 
     返回本次触发告警的记录列表。
     """
+    # 先清除已同步的项目，避免误报
+    _clear_synced_projects(config)
+
     overdue = state.list_overdue_hotfix_syncs(config.hotfix_sync_threshold_hours)
     if not overdue:
         return []
