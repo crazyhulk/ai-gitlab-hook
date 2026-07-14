@@ -270,18 +270,27 @@ def _on_feature_issue_open(
 
     # 格式合规 → 通知研发认领
     assignee_str = "、".join(assignee_names) if assignee_names else "（待指派）"
+    if issue_type == "quickfix":
+        heading = "### ⚡ 快速迭代 Issue 待认领"
+        cmd = f"ccg gitlab quickfix start {issue_iid}"
+        merge_hint = "\n> ⚠️ 快速迭代分支直接合入 `main`，无需走 pre 验收"
+    else:
+        heading = f"### 新{type_label} Issue 待认领"
+        cmd = f"ccg gitlab feature start {issue_iid}"
+        merge_hint = ""
     content = (
-        f"### 新{type_label} Issue 待认领\n"
+        f"{heading}\n"
         f"> **Issue #{issue_iid}**：{issue_title}\n"
         f"> **提出人**：{reporter_name}\n"
         f"> **负责人**：{assignee_str}\n"
         f"> [查看 Issue]({issue_url})\n\n"
         f"**下一步 · {assignee_str or '研发'}**\n"
-        f"> 请阅读{type_label}后执行以下命令认领并拉取功能分支：\n"
-        f"> `ccg gitlab feature start {issue_iid}`"
+        f"> 请阅读{type_label}后执行以下命令认领并拉取分支：\n"
+        f"> `{cmd}`"
+        f"{merge_hint}"
     )
     at_mobiles = config.resolve_wechat_ids(assignee_usernames)
-    logger.info("Feature/improve issue #%s created, notifying assignees=%s", issue_iid, assignee_usernames)
+    logger.info("Feature/improve/quickfix issue #%s created type=%s, notifying assignees=%s", issue_iid, issue_type, assignee_usernames)
     send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
     return "ok"
 
@@ -379,7 +388,13 @@ def _on_issue_assignee_change(
         send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
         return
 
-    cmd = f"ccg gitlab hotfix start {issue_iid}" if is_bug else f"ccg gitlab feature start {issue_iid}"
+    if is_bug:
+        cmd = f"ccg gitlab hotfix start {issue_iid}"
+    elif issue_type == "quickfix":
+        cmd = f"ccg gitlab quickfix start {issue_iid}"
+    else:
+        cmd = f"ccg gitlab feature start {issue_iid}"
+    merge_hint = "\n> ⚠️ 快速迭代分支直接合入 `main`，无需走 pre 验收" if issue_type == "quickfix" else ""
     content = (
         f"### {type_label} Issue 已指派\n"
         f"> **Issue #{issue_iid}**：{issue_title}\n"
@@ -389,9 +404,10 @@ def _on_issue_assignee_change(
         f"**下一步 · {assignee_str}**\n"
         f"> 请阅读 Issue 后执行以下命令认领并拉取分支：\n"
         f"> `{cmd}`"
+        f"{merge_hint}"
     )
     at_mobiles = config.resolve_wechat_ids(assignee_usernames)
-    logger.info("Issue #%s assignee changed, notifying new assignees=%s", issue_iid, assignee_usernames)
+    logger.info("Issue #%s assignee changed type=%s, notifying new assignees=%s", issue_iid, issue_type, assignee_usernames)
     send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
 
 
@@ -434,6 +450,7 @@ def _on_issue_update(
         cmd = f"ccg gitlab feature start {issue_iid}"
     type_label = {"bug": "Bug", "improve": "优化", "quickfix": "快速迭代"}.get(issue_type or "", "需求")
     assignee_str = "、".join(assignee_names) if assignee_names else "（待指派）"
+    merge_hint = "\n> ⚠️ 快速迭代分支直接合入 `main`，无需走 pre 验收" if issue_type == "quickfix" else ""
     content = (
         f"### {type_label} Issue 格式已补全，可以认领\n"
         f"> **Issue #{issue_iid}**：{issue_title}\n"
@@ -443,6 +460,7 @@ def _on_issue_update(
         f"**下一步 · {assignee_str or '研发'}**\n"
         f"> 产品已补充完整 Issue 格式，执行以下命令认领：\n"
         f"> `{cmd}`"
+        f"{merge_hint}"
     )
     at_mobiles = config.resolve_wechat_ids(assignee_usernames or [reporter_username])
     logger.info("Issue #%s became valid, notifying assignees=%s", issue_iid, assignee_usernames)

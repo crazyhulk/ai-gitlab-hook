@@ -52,18 +52,18 @@ GitLab Webhook 接收服务，将 GitLab 事件转化为企业微信群消息，
 
 | 事件 | 触发场景 | 通知对象 |
 |------|---------|---------|
-| **Issue open / reopen** | 需求/优化 Issue，格式合规（章节齐全且已指派 assignee） | 研发（assignee） |
-| **Issue open / reopen** | 需求/优化 Issue，格式不合规（缺少章节或未指派 assignee） | 产品（reporter） |
+| **Issue open / reopen** | 需求/优化/快速迭代 Issue，格式合规（章节齐全且已指派 assignee） | 研发（assignee） |
+| **Issue open / reopen** | 需求/优化/快速迭代 Issue，格式不合规（缺少章节或未指派 assignee） | 产品（reporter） |
 | **Issue open / reopen** | Bug Issue，格式合规（章节齐全且已指派 assignee） | 研发 + TL |
 | **Issue open / reopen** | Bug Issue，格式不合规（缺少章节或未指派 assignee） | 产品（reporter） |
-| **Issue update** | 新增 assignee（需求/优化/Bug），模板格式合规 | 新增的研发（assignee） |
-| **Issue update** | 新增 assignee（需求/优化/Bug），模板格式不合规（缺少章节） | 产品（reporter） |
+| **Issue update** | 新增 assignee（需求/优化/快速迭代/Bug），模板格式合规 | 新增的研发（assignee） |
+| **Issue update** | 新增 assignee（需求/优化/快速迭代/Bug），模板格式不合规（缺少章节） | 产品（reporter） |
 | **Issue update** | description 变更前不合规、变更后合规且已有 assignee | 研发（assignee） |
-| **MR approved** | 需求 MR（`issue_*` 分支）通过 | 研发 |
+| **MR approved** | 需求 MR（`issue_*`/`feature/*` 分支）通过 | 研发 |
+| **MR approved** | 快速迭代 MR（`quickfix/*` → `main`）通过 | 研发 |
 | **MR approved** | 热修 MR（`hotfix_*` → `main`，紧急路径）通过 | 研发 + TL |
 | **MR approved** | 热修 MR（`hotfix_*` → `pre`，非紧急路径）通过 | 研发 |
 | **MR approved** | 上线 MR（`pre` → `main`）通过 | 研发 |
-| **MR approved** | 热修同步 MR（`main/master` → `pre`）通过 | 研发 |
 | **Note** | Issue 评论含 `product:pass/reject` | 研发 |
 | **Note** | Issue 评论含 `developer:pass/reject` | 产品 |
 | **Note** | 普通 Issue 评论 | 研发（排除评论人自己） |
@@ -78,6 +78,7 @@ Issue 类型根据 description 中的模板章节自动识别，无需标题前�
 | 需求 | `## 需求背景` | 需求背景、功能详细描述、验收标准、优先级、**负责人（assignee）** |
 | 优化 | `## 优化背景` | 优化背景、现状问题、优化方案、预期收益、优先级、**负责人（assignee）** |
 | Bug  | `## 问题现象` | 问题现象、复现步骤、预期正常结果、实际异常结果、出现环境、严重等级、**负责人（assignee）** |
+| 快速迭代 | `## 变更说明` | 变更说明、影响范围、验收标准、优先级、**负责人（assignee）**；分支直接合入 `main`，跳过 pre 验收 |
 
 章节缺失或未指派研发（assignee）均视为不合规，通知产品补充；补全后自动触发研发认领通知。
 
