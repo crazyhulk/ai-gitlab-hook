@@ -97,7 +97,7 @@ Issue 类型根据 description 中的模板章节自动识别，无需标题前�
 | MR 标题不符规范 | `issue_*` MR 标题不以 `[需求]` 开头，或 `hotfix_*` 不以 `[Bug热修]` 开头 | 操作人 + TL |
 | Issue 未验收即关闭 | 需求/优化 Issue 关闭时查 GitLab API，`product:pass` 和 `developer:pass` 均需完成 | 操作人 + TL |
 | MR 审批不足即合并 | `issue_*`/`hotfix_*` MR 合并时查 GitLab API，Approve 不足（`hotfix_*` → `main` 需 N 人，其余需 1 人） | 操作人 + TL |
-| 热修未及时同步 pre | 热修 MR 合入 `main` 后超过 `hotfix_sync_threshold_hours`（默认 4 小时）未同步到 `pre` | TL |
+| 热修未及时同步 pre | 热修 MR 合入 `main` 后超过 `hotfix_sync_threshold_hours`（默认 4 小时）未同步到 `pre`（需 `backend-pre` rebase `main` 后 `--force-with-lease` 强推） | TL |
 
 ### 热修双路径
 
@@ -171,7 +171,7 @@ GET /violations?start=2026-05-01&end=2026-05-16
 
 ### 热修同步超时检查
 
-服务启动后在后台按 `hotfix_sync_check_interval_seconds`（默认 60 秒）自动循环检查：热修 MR 合入 `main` 后是否在 `hotfix_sync_threshold_hours`（默认 4 小时）内完成了 `main → pre` 同步。超时的项目会收到企微告警并写入 `hotfix_sync_overdue` 违规记录。
+服务启动后在后台按 `hotfix_sync_check_interval_seconds`（默认 60 秒）自动循环检查：热修 MR 合入 `main` 后是否在 `hotfix_sync_threshold_hours`（默认 4 小时）内完成了 `main → pre` 同步。检测通过 GitLab compare API 比较 `pre..main`，如果没有多余提交则视为已同步；`pre` 分支正确的同步方式是 `backend-pre` rebase 到最新 `main` 后 `git push --force-with-lease`。超时的项目会收到企微告警并写入 `hotfix_sync_overdue` 违规记录。
 
 `/check-hotfix-sync` 接口用于手动触发（调试或补跑），返回本次告警的记录列表。
 

@@ -957,7 +957,6 @@ def handle_mr_event(payload: dict[str, Any], config: Config) -> str:
     is_hotfix = _is_hotfix_branch(source_branch)
     is_quickfix = _is_quickfix_branch(source_branch)
     is_release = source_branch == config.pre_branch
-    is_sync_pre = source_branch == config.main_branch and target_branch == config.pre_branch
 
     at_mobiles = config.resolve_wechat_ids(assignee_usernames)
 
@@ -1024,18 +1023,6 @@ def handle_mr_event(payload: dict[str, Any], config: Config) -> str:
             f"> [查看 MR]({mr_url})\n\n"
             f"**下一步 · {developer_label}**\n"
             f"> TL 已批准，执行以下命令合并上线：\n"
-            f"> `ccg gitlab mr merge {mr_iid}`"
-        )
-
-    elif is_sync_pre:
-        content = (
-            f"### 热修同步 MR 审批通过 ✓\n"
-            f"> **MR !{mr_iid}**：{mr_title}\n"
-            f"> **审批人**：{approver_name}\n"
-            f"> `{source_branch} → {target_branch}` 同步 MR 已通过\n"
-            f"> [查看 MR]({mr_url})\n\n"
-            f"**下一步 · {developer_label}**\n"
-            f"> 执行以下命令完成热修代码同步到 pre：\n"
             f"> `ccg gitlab mr merge {mr_iid}`"
         )
 
@@ -1524,8 +1511,14 @@ def run_hotfix_sync_check(config: Config) -> list[dict]:
             f"尚未同步到 `pre`：\n"
             f"{mr_lines}\n\n"
             f"**下一步**\n"
-            f"> 请执行以下命令将热修代码同步到 pre：\n"
-            f"> `ccg gitlab mr sync-pre`"
+            f"> 请将 `backend-pre` rebase 到最新的 `main` 后强推：\n"
+            f"> ```\n"
+            f"> git checkout backend-pre\n"
+            f"> git pull\n"
+            f"> git fetch origin main\n"
+            f"> git rebase origin/main\n"
+            f"> git push --force-with-lease\n"
+            f"> ```"
         )
         at_mobiles = config.tl_mobiles
         logger.warning(
