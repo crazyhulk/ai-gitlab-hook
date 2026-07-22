@@ -482,6 +482,92 @@ def _on_issue_update(
 _CLOSES_RE = re.compile(r"[Cc]loses\s+#\d+")
 
 
+def _update_frontend_review_status(
+    config: Config,
+    payload: dict[str, Any],
+    attrs: dict[str, Any],
+) -> bool:
+    """更新 frontend-v1 目录的指定 Reviewer 审批门禁。"""
+    if not config.gitlab_client:
+        return False
+
+    project = payload.get("project", {}) or {}
+    project_id = project.get("id")
+    mr_iid = attrs.get("iid")
+    mr_url = attrs.get("url", "")
+    commit_sha = attrs.get("last_commit", {}).get("id") if isinstance(attrs.get("last_commit"), dict) else None
+    if not commit_sha:
+        commit_sha = attrs.get("sha")
+
+    if not project_id or not mr_iid or not commit_sha:
+        logger.warning(
+            "Skipping frontend review check: project_id=%s mr_iid=%s commit_sha=%s",
+            project_id, mr_iid, bool(commit_sha),
+        )
+        return False
+
+    review_path = config.frontend_review_path
+    required_reviewers = set(config.frontend_required_reviewers)
+
+    try:
+        changes = config.gitlab_client.get_mr_changes(project_id, mr_iid)
+        touches_frontend = bool(review_path) and any(
+            (change.get("old_path") or "").startswith(review_path)
+            or (change.get("new_path") or "").startswith(review_path)
+            for change in changes
+        )
+
+        if not touches_frontend:
+            config.gitlab_client.set_commit_status(
+                project_id=project_id,
+                commit_sha=commit_sha,
+                state="success",
+                name="frontend-review-check",
+                description=f"未修改 {review_path}，无需指定前端 Reviewer",
+            )
+            return True
+
+        approvals = config.gitlab_client.get_mr_approvals(project_id, mr_iid)
+        approved_usernames = {
+            item.get("user", {}).get("username", "")
+            for item in (approvals.get("approved_by") or [])
+        }
+        matched_reviewers = sorted(required_reviewers & approved_usernames)
+
+        if matched_reviewers:
+            description = f"{review_path} 已由 {', '.join(matched_reviewers)} Approve"
+            state_name = "success"
+        else:
+            reviewers_label = " 或 ".join(sorted(required_reviewers))
+            description = f"修改了 {review_path}，需 {reviewers_label} Approve"
+            state_name = "failed"
+
+        config.gitlab_client.set_commit_status(
+            project_id=project_id,
+            commit_sha=commit_sha,
+            state=state_name,
+            name="frontend-review-check",
+            description=description[:255],
+            target_url=mr_url,
+        )
+        logger.info(
+            "Updated frontend review check MR !%s state=%s matched_reviewers=%s",
+            mr_iid, state_name, matched_reviewers,
+        )
+        return True
+    except Exception as e:
+        logger.warning("Frontend review check failed for MR !%s: %s", mr_iid, e)
+        config.gitlab_client.set_commit_status(
+            project_id=project_id,
+            commit_sha=commit_sha,
+            state="failed",
+            name="frontend-review-check",
+            description="前端 Reviewer 检查执行失败，请联系管理员",
+            target_url=mr_url,
+        )
+        return True
+
+
 def _on_mr_open(
     payload: dict[str, Any],
     attrs: dict[str, Any],
@@ -502,6 +588,7 @@ def _on_mr_open(
     project_id = project.get("id")
 
     violations_found = False
+    frontend_checked = _update_frontend_review_status(config, payload, attrs)
 
     # 热修 MR（hotfix_* → main），检查 Approve 数量
     is_hotfix_to_main = _is_hotfix_branch(source_branch) and target_branch == config.main_branch
@@ -757,7 +844,7 @@ def _on_mr_open(
             send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
             violations_found = True
 
-    return "ok" if violations_found else "ignored"
+    return "ok" if violations_found or frontend_checked else "ignored"
 
 
 def _on_mr_update(
@@ -765,10 +852,11 @@ def _on_mr_update(
     attrs: dict[str, Any],
     config: Config,
 ) -> str:
-    """处理 MR 更新事件，主要检查 description 是否补充了 Closes #xxx。"""
+    """处理 MR 更新事件，刷新 diff 门禁并检查 Closes #xxx。"""
+    frontend_checked = _update_frontend_review_status(config, payload, attrs)
     changes = payload.get("changes", {})
     if "description" not in changes:
-        return "ignored"
+        return "ok" if frontend_checked else "ignored"
 
     mr_iid = attrs.get("iid", "?")
     source_branch: str = attrs.get("source_branch", "")
@@ -916,15 +1004,17 @@ def handle_mr_event(payload: dict[str, Any], config: Config) -> str:
     attrs = payload.get("object_attributes", {}) or {}
     action = attrs.get("action", "")
 
-    if action == "open":
+    if action in ("open", "reopen"):
         return _on_mr_open(payload, attrs, config)
 
     if action == "merge":
         return _on_mr_merged(payload, attrs, config)
 
     if action == "update":
-        # MR description 更新，检查是否补充了 Closes #xxx
         return _on_mr_update(payload, attrs, config)
+
+    if action == "unapproved":
+        return "ok" if _update_frontend_review_status(config, payload, attrs) else "ignored"
 
     if action != "approved":
         logger.info("MR event action=%s, ignored", action)
@@ -951,6 +1041,8 @@ def handle_mr_event(payload: dict[str, Any], config: Config) -> str:
     project = payload.get("project", {}) or {}
     project_name = project.get("name", "")
     project_id = project.get("id")
+
+    _update_frontend_review_status(config, payload, attrs)
 
     # payload 里 assignees 为空时，调 API 补全（部分 GitLab 版本 approved 事件不带 assignees）
     if not assignees and config.gitlab_client and project_id:

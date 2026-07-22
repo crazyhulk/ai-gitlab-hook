@@ -89,6 +89,19 @@ class GitLabClient:
             logger.warning("get_mr !%s project=%s failed: %s", mr_iid, project_id, e)
             return {}
 
+    def get_mr_changes(self, project_id: int, mr_iid: int) -> list[dict]:
+        """返回 MR 的完整文件变更列表。
+
+        access_raw_diffs 避免大型 MR 因数据库 diff 限制遗漏受控目录文件。
+        调用失败时向上抛错，由门禁逻辑按失败处理。
+        """
+        result = self._request(
+            "GET",
+            f"/projects/{project_id}/merge_requests/{mr_iid}/changes",
+            params={"access_raw_diffs": "true"},
+        )
+        return result.get("changes") or []
+
     def compare_branches(self, project_id: int, from_branch: str, to_branch: str) -> dict:
         """比较两个分支，返回 to 相对 from 的 commits 和 diffs。
 

@@ -36,6 +36,14 @@ GitLab Webhook 接收服务，将 GitLab 事件转化为企业微信群消息，
 - **自动更新**：编辑 MR 描述补充引用后自动解除限制
 - **防绕过**：即使功能分支直接合入 main（违规操作），也必须有 Issue 关联才能追踪验收状态
 
+#### 4. 前端目录 Reviewer 门禁（`frontend-review-check`）
+
+MR 修改 `frontend-v1/` 下任意文件时，必须由以下至少一人完成 GitLab Approve：
+- `yangzhengpeng01`
+- `wangqiyuan01`
+
+未满足时 Commit Status 为 `failed`；MR 创建、推送新提交、Approve、Unapprove 和重新打开时都会自动重新检查。
+
 #### 防绕过机制
 
 | 绕过尝试 | 是否被阻止 | 说明 |
@@ -190,6 +198,8 @@ GET /violations?start=2026-05-01&end=2026-05-16
 | `pre_branch` | `GITLAB_BRANCH_PRE` | 预发布分支名，默认 `pre`（与 ai-workflow 保持一致） |
 | `tl_usernames` | `TL_USERNAMES=user1,user2` | TL / Reviewer 的 GitLab 用户名，违规告警及热修紧急路径额外 @ |
 | `hotfix_required_approvals` | `HOTFIX_REQUIRED_APPROVALS` | 热修紧急路径（→ `main`）所需最少 Approve 人数，默认 2；非紧急路径（→ `pre`）固定为 1 |
+| `frontend_review_path` | `FRONTEND_REVIEW_PATH` | 需要指定 Reviewer 审批的目录，默认 `frontend-v1/` |
+| `frontend_required_reviewers` | `FRONTEND_REQUIRED_REVIEWERS=user1,user2` | 前端目录允许的 Reviewer，任一人 Approve 即通过 |
 | `hotfix_sync_threshold_hours` | `HOTFIX_SYNC_THRESHOLD_HOURS` | 热修合入 `main` 后超过此小时数未同步 `pre` 则告警，默认 4 |
 | `hotfix_sync_check_interval_seconds` | `HOTFIX_SYNC_CHECK_INTERVAL` | 内部定时检查热修同步状态的间隔秒数，默认 60（1 分钟） |
 | `user_map.<username>` | `WECHAT_USER_<username>=<mobile>` | GitLab 用户名 → 企业微信手机号映射 |
@@ -236,7 +246,7 @@ bash service.sh status   # 查看状态
 **注意**：
 - 如果项目已配置 CI/CD Pipeline，Commit Status 和 Pipeline 状态都必须通过才能合并
 - 如果项目没有 Pipeline，只检查 Commit Status
-- Commit Status 名称为 `pre-acceptance-check`，会显示在 MR 页面的 "Checks" 区域
+- Commit Status 名称包括 `pre-acceptance-check`、`hotfix-approval-check`、`issue-reference-check`、`frontend-review-check`，会显示在 MR 页面的 "Checks" 区域
 
 ### 3. 配置 Protected Branches（推荐）
 
@@ -350,12 +360,12 @@ config.yaml.example    # 配置模板
 POST /api/v4/projects/:id/statuses/:sha
 {
   "state": "success",  # pending, running, success, failed, canceled
-  "name": "pre-acceptance-check",  # 或 hotfix-approval-check, issue-reference-check
+  "name": "pre-acceptance-check",  # 或 hotfix-approval-check, issue-reference-check, frontend-review-check
   "description": "所有 Issue 验收已完成"
 }
 ```
 
-### 三种门禁的触发时机
+### 四种门禁的触发时机
 
 #### 1. 上线 MR 验收门禁（`pre-acceptance-check`）
 
@@ -407,6 +417,19 @@ POST /api/v4/projects/:id/statuses/:sha
 - 缺少 Issue 引用 → `failed`
 - **仅对 `issue_*`/`hotfix_*` → `pre` 的 MR 生效**
 
+#### 4. 前端目录 Reviewer 门禁（`frontend-review-check`）
+
+**触发时机**：
+- MR 创建或重新打开
+- MR 更新（包括推送新提交）
+- MR Approve 或 Unapprove
+
+**状态判断逻辑**：
+- diff 未修改 `frontend-v1/` → `success`
+- diff 修改 `frontend-v1/`，且 `yangzhengpeng01` 或 `wangqiyuan01` 已 Approve → `success`
+- diff 修改 `frontend-v1/`，但指定 Reviewer 均未 Approve → `failed`
+- diff 查询异常 → `failed`，避免检查异常时放行
+
 ### Issue 关联逻辑
 
 上线 MR 通过以下方式关联 Issue：
@@ -447,11 +470,10 @@ A: 不建议绕过，但如果确实需要（如紧急情况）：
 
 ### Q: 合并门禁会影响哪些 MR？
 
-A: 共三类门禁，分别针对不同类型的 MR：
+A: 共四类门禁，分别针对不同类型的 MR：
 - **`issue_*`/`hotfix_*` → `pre`/`main`**：Issue 关联门禁，MR 描述必须包含 `Closes #xxx`
 - **`hotfix_*` → `main`**：审批门禁，需满足最低 Approve 人数
 - **`pre` → `main`**：验收门禁，所有关联 Issue 必须完成双方验收
+- **修改 `frontend-v1/` 的任意 MR**：必须由 `yangzhengpeng01` 或 `wangqiyuan01` 至少一人 Approve
 
 所有门禁均通过 Commit Status 实现，无法在 GitLab 页面绕过。
-
-

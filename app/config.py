@@ -51,6 +51,11 @@ class Config:
     pre_branch: str = "pre"
     # 热修 MR 所需最少 Approve 人数（需求 MR 固定为 1；hotfix→pre 固定为 1）
     hotfix_required_approvals: int = 2
+    # 修改指定前端目录时，至少需要其中一名 Reviewer Approve
+    frontend_review_path: str = "frontend-v1/"
+    frontend_required_reviewers: list[str] = field(
+        default_factory=lambda: ["yangzhengpeng01", "wangqiyuan01"]
+    )
     # hotfix 合入 main 后，超过此小时数未同步 pre 则触发告警
     hotfix_sync_threshold_hours: int = 4
     # 内部定时检查热修同步状态的间隔秒数（默认每分钟一次）
@@ -109,6 +114,29 @@ def load_config(path: str = "config.yaml") -> Config:
     if env_tl:
         tl_usernames = [x.strip() for x in env_tl.split(",") if x.strip()]
 
+    frontend_reviewers_raw = data.get("frontend_required_reviewers") or [
+        "yangzhengpeng01",
+        "wangqiyuan01",
+    ]
+    if isinstance(frontend_reviewers_raw, list):
+        frontend_required_reviewers = [str(x) for x in frontend_reviewers_raw if x]
+    else:
+        frontend_required_reviewers = [
+            x.strip() for x in str(frontend_reviewers_raw).split(",") if x.strip()
+        ]
+    env_frontend_reviewers = os.environ.get("FRONTEND_REQUIRED_REVIEWERS", "")
+    if env_frontend_reviewers:
+        frontend_required_reviewers = [
+            x.strip() for x in env_frontend_reviewers.split(",") if x.strip()
+        ]
+
+    frontend_review_path = os.environ.get(
+        "FRONTEND_REVIEW_PATH",
+        str(data.get("frontend_review_path", "frontend-v1/")),
+    ).strip()
+    if frontend_review_path and not frontend_review_path.endswith("/"):
+        frontend_review_path += "/"
+
     main_branch = os.environ.get("GITLAB_BRANCH_MAIN", str(data.get("main_branch", "main")))
     pre_branch = os.environ.get("GITLAB_BRANCH_PRE", str(data.get("pre_branch", "pre")))
 
@@ -160,6 +188,8 @@ def load_config(path: str = "config.yaml") -> Config:
         main_branch=main_branch,
         pre_branch=pre_branch,
         hotfix_required_approvals=hotfix_required_approvals,
+        frontend_review_path=frontend_review_path,
+        frontend_required_reviewers=frontend_required_reviewers,
         hotfix_sync_threshold_hours=hotfix_sync_threshold_hours,
         hotfix_sync_check_interval_seconds=hotfix_sync_check_interval_seconds,
     )
