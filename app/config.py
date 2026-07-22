@@ -54,7 +54,7 @@ class Config:
     # 修改指定前端目录时，至少需要其中一名 Reviewer Approve
     frontend_review_path: str = "frontend-v1/"
     frontend_required_reviewers: list[str] = field(
-        default_factory=lambda: ["yangzhengpeng01", "wangqiyuan01"]
+        default_factory=lambda: ["yangzhengpeng01", "wangqiyuan01", "xuying13"]
     )
     # hotfix 合入 main 后，超过此小时数未同步 pre 则触发告警
     hotfix_sync_threshold_hours: int = 4
@@ -117,6 +117,7 @@ def load_config(path: str = "config.yaml") -> Config:
     frontend_reviewers_raw = data.get("frontend_required_reviewers") or [
         "yangzhengpeng01",
         "wangqiyuan01",
+        "xuying13",
     ]
     if isinstance(frontend_reviewers_raw, list):
         frontend_required_reviewers = [str(x) for x in frontend_reviewers_raw if x]

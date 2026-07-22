@@ -41,6 +41,7 @@ GitLab Webhook 接收服务，将 GitLab 事件转化为企业微信群消息，
 MR 修改 `frontend-v1/` 下任意文件时，必须由以下至少一人完成 GitLab Approve：
 - `yangzhengpeng01`
 - `wangqiyuan01`
+- `xuying13`
 
 未满足时 Commit Status 为 `failed`；MR 创建、推送新提交、Approve、Unapprove 和重新打开时都会自动重新检查。
 
@@ -426,7 +427,7 @@ POST /api/v4/projects/:id/statuses/:sha
 
 **状态判断逻辑**：
 - diff 未修改 `frontend-v1/` → `success`
-- diff 修改 `frontend-v1/`，且 `yangzhengpeng01` 或 `wangqiyuan01` 已 Approve → `success`
+- diff 修改 `frontend-v1/`，且 `yangzhengpeng01`、`wangqiyuan01` 或 `xuying13` 已 Approve → `success`
 - diff 修改 `frontend-v1/`，但指定 Reviewer 均未 Approve → `failed`
 - diff 查询异常 → `failed`，避免检查异常时放行
 
@@ -474,6 +475,6 @@ A: 共四类门禁，分别针对不同类型的 MR：
 - **`issue_*`/`hotfix_*` → `pre`/`main`**：Issue 关联门禁，MR 描述必须包含 `Closes #xxx`
 - **`hotfix_*` → `main`**：审批门禁，需满足最低 Approve 人数
 - **`pre` → `main`**：验收门禁，所有关联 Issue 必须完成双方验收
-- **修改 `frontend-v1/` 的任意 MR**：必须由 `yangzhengpeng01` 或 `wangqiyuan01` 至少一人 Approve
+- **修改 `frontend-v1/` 的任意 MR**：必须由 `yangzhengpeng01`、`wangqiyuan01` 或 `xuying13` 至少一人 Approve
 
 所有门禁均通过 Commit Status 实现，无法在 GitLab 页面绕过。

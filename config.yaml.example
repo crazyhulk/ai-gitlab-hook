@@ -24,6 +24,7 @@ frontend_review_path: "frontend-v1/"
 frontend_required_reviewers:
   - yangzhengpeng01
   - wangqiyuan01
+  - xuying13
 hotfix_sync_threshold_hours: 4        # 热修合入 main 后超过此小时数未同步 pre 则告警
 hotfix_sync_check_interval_seconds: 60    # 内部定时检查间隔（秒），默认每分钟一次
 

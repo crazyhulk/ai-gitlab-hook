@@ -34,7 +34,11 @@ class FrontendReviewGateTest(unittest.TestCase):
         return SimpleNamespace(
             gitlab_client=client,
             frontend_review_path="frontend-v1/",
-            frontend_required_reviewers=["yangzhengpeng01", "wangqiyuan01"],
+            frontend_required_reviewers=[
+                "yangzhengpeng01",
+                "wangqiyuan01",
+                "xuying13",
+            ],
         )
 
     def payload(self):
@@ -70,6 +74,19 @@ class FrontendReviewGateTest(unittest.TestCase):
 
         self.assertEqual(client.statuses[-1]["state"], "success")
         self.assertIn("wangqiyuan01", client.statuses[-1]["description"])
+
+    def test_xuying_can_approve(self):
+        client = FakeGitLabClient(
+            [{"new_path": "frontend-v1/src/app.ts"}],
+            approved_usernames=["xuying13"],
+        )
+
+        _update_frontend_review_status(
+            self.make_config(client), self.payload(), self.attrs()
+        )
+
+        self.assertEqual(client.statuses[-1]["state"], "success")
+        self.assertIn("xuying13", client.statuses[-1]["description"])
 
     def test_unrelated_change_passes(self):
         client = FakeGitLabClient([{"new_path": "backend/app.py"}])
