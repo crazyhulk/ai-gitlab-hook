@@ -11,17 +11,9 @@ from .wechat import send_webhook
 logger = get_logger(__name__)
 
 # ──────────────────────────────────────────────────────────────
-# Issue 格式校验（与 ai-workflow/cc/validator.py 保持一致）
+# Issue 类型识别（与 ai-workflow/cc/validator.py 保持一致）
+# 已去除 ## 小节格式校验，走轻量流程，仅要求指派研发负责人
 # ──────────────────────────────────────────────────────────────
-
-_FEATURE_SECTIONS = ["需求背景", "功能详细描述", "验收标准", "优先级"]
-_IMPROVE_SECTIONS = ["优化背景", "现状问题", "优化方案", "预期收益", "优先级"]
-_BUG_SECTIONS = ["问题现象", "复现步骤", "预期正常结果", "实际异常结果", "出现环境", "严重等级"]
-_QUICKFIX_SECTIONS = ["变更说明", "影响范围", "验收标准", "优先级"]
-
-
-def _missing_sections(body: str, sections: list[str]) -> list[str]:
-    return [s for s in sections if not re.search(rf"##\s*{re.escape(s)}", body or "")]
 
 
 def _detect_issue_type(description: str) -> str | None:
@@ -62,7 +54,7 @@ def _is_feature_or_hotfix_branch(branch: str) -> bool:
 # Issue Hook
 # 覆盖的人工通知节点：
 #   节点1 — 新需求 Issue 创建后，产品通知研发认领
-#   节点2 — Issue 格式不合规补充后，产品通知研发重新认领
+#   节点2 — Issue 指派研发后，产品通知研发认领
 #   节点6 — 线上 Bug Issue 创建后，产品通知研发+TL 热修
 # ──────────────────────────────────────────────────────────────
 
@@ -151,17 +143,7 @@ def handle_issue_event(payload: dict[str, Any], config: Config) -> str:
                     )
                     send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
                     notified = True
-            if "description" in changes:
-                prev_description = (changes.get("description") or {}).get("previous", "") or ""
-                result = _on_issue_update(
-                    config, issue_iid, issue_title, issue_url, description,
-                    reporter_name, reporter_username, assignee_names, assignee_usernames,
-                    is_bug=is_bug,
-                    issue_type=issue_type,
-                    prev_description=prev_description,
-                )
-                if result == "ok":
-                    notified = True
+            # 已去除 ## 小节格式校验，描述变更不再触发"格式补全后认领"通知
             return "ok" if notified else "ignored"
         return "ignored"
 
@@ -246,25 +228,19 @@ def _on_feature_issue_open(
     reporter_name, reporter_username, assignee_names, assignee_usernames,
     issue_type: str = "feature",
 ) -> str:
-    sections = {"feature": _FEATURE_SECTIONS, "improve": _IMPROVE_SECTIONS, "quickfix": _QUICKFIX_SECTIONS}.get(issue_type, _FEATURE_SECTIONS)
     type_label = {"improve": "优化", "quickfix": "快速迭代"}.get(issue_type, "需求")
-    missing = _missing_sections(description, sections)
+    # 走轻量流程，不校验 ## 小节格式，仅要求指派了研发负责人
     if not assignee_usernames:
-        missing.append("负责人（指派研发）")
-    if missing:
-        missing_str = "、".join(missing)
         content = (
-            f"### {type_label} Issue 格式不合规\n"
+            f"### {type_label} Issue 待指派研发\n"
             f"> **Issue #{issue_iid}**：{issue_title}\n"
             f"> **提出人**：{reporter_name}\n"
             f"> [查看 Issue]({issue_url})\n\n"
-            f"**不合规详情**\n"
-            f"> 缺少必填小节：{missing_str}\n\n"
             f"**下一步 · {reporter_name}（产品）**\n"
-            f"> 请按标准模板补充以上小节内容"
+            f"> 请指派研发负责人"
         )
         at_mobiles = config.resolve_wechat_ids([reporter_username])
-        logger.info("Feature/improve issue #%s invalid missing=%s, notifying reporter=%s", issue_iid, missing, reporter_username)
+        logger.info("Feature/improve issue #%s no assignee, notifying reporter=%s", issue_iid, reporter_username)
         send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
         return "ok"
 
@@ -300,23 +276,18 @@ def _on_bug_issue_open(
     issue_iid, issue_title, issue_url, description,
     reporter_name, reporter_username, assignee_names, assignee_usernames,
 ) -> str:
-    missing = _missing_sections(description, _BUG_SECTIONS)
+    # 走轻量流程，不校验 ## 小节格式，仅要求指派了研发负责人
     if not assignee_usernames:
-        missing.append("负责人（指派研发）")
-    if missing:
-        missing_str = "、".join(missing)
         content = (
-            f"### Bug Issue 格式不合规\n"
+            f"### Bug Issue 待指派研发\n"
             f"> **Issue #{issue_iid}**：{issue_title}\n"
             f"> **提出人**：{reporter_name}\n"
             f"> [查看 Issue]({issue_url})\n\n"
-            f"**不合规详情**\n"
-            f"> 缺少必填小节：{missing_str}\n\n"
             f"**下一步 · {reporter_name}（产品）**\n"
-            f"> 请补充完整以上小节内容，Bug 越描述清楚修复越快"
+            f"> 请指派研发负责人"
         )
         at_mobiles = config.resolve_wechat_ids([reporter_username])
-        logger.info("Bug issue #%s invalid missing=%s, notifying reporter=%s", issue_iid, missing, reporter_username)
+        logger.info("Bug issue #%s no assignee, notifying reporter=%s", issue_iid, reporter_username)
         send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
         return "ok"
 
@@ -360,34 +331,7 @@ def _on_issue_assignee_change(
     assignee_usernames = [a.get("username", "") for a in new_assignees if a.get("username")]
     assignee_str = "、".join(assignee_names)
 
-    # 指派时同步校验模板，与 ccg feature/hotfix/quickfix start 保持一致
-    if is_bug:
-        sections = _BUG_SECTIONS
-    elif issue_type == "improve":
-        sections = _IMPROVE_SECTIONS
-    elif issue_type == "quickfix":
-        sections = _QUICKFIX_SECTIONS
-    else:
-        sections = _FEATURE_SECTIONS
-    missing = _missing_sections(description, sections)
-
-    if missing:
-        missing_str = "、".join(missing)
-        content = (
-            f"### {type_label} Issue 格式不合规\n"
-            f"> **Issue #{issue_iid}**：{issue_title}\n"
-            f"> **提出人**：{reporter_name}\n"
-            f"> [查看 Issue]({issue_url})\n\n"
-            f"**不合规详情**\n"
-            f"> 缺少必填小节：{missing_str}\n\n"
-            f"**下一步 · {reporter_name}（产品）**\n"
-            f"> 请按标准模板补充以上小节内容"
-        )
-        at_mobiles = config.resolve_wechat_ids([reporter_username])
-        logger.info("Issue #%s assignee set but template invalid missing=%s, notifying reporter=%s", issue_iid, missing, reporter_username)
-        send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
-        return
-
+    # 走轻量流程，不再校验 ## 小节格式；指派即通知研发认领
     if is_bug:
         cmd = f"ccg gitlab hotfix start {issue_iid}"
     elif issue_type == "quickfix":
@@ -409,63 +353,6 @@ def _on_issue_assignee_change(
     at_mobiles = config.resolve_wechat_ids(assignee_usernames)
     logger.info("Issue #%s assignee changed type=%s, notifying new assignees=%s", issue_iid, issue_type, assignee_usernames)
     send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
-
-
-def _on_issue_update(
-    config: Config,
-    issue_iid, issue_title, issue_url, description,
-    reporter_name, reporter_username, assignee_names, assignee_usernames,
-    is_bug: bool,
-    issue_type: str | None = None,
-    prev_description: str = "",
-) -> str:
-    if is_bug:
-        sections = _BUG_SECTIONS
-    elif issue_type == "improve":
-        sections = _IMPROVE_SECTIONS
-    elif issue_type == "quickfix":
-        sections = _QUICKFIX_SECTIONS
-    else:
-        sections = _FEATURE_SECTIONS
-
-    if not _missing_sections(prev_description, sections):
-        logger.info("Issue #%s description updated but was already valid before, skipping", issue_iid)
-        return "ignored"
-
-    missing = _missing_sections(description, sections)
-    if missing:
-        logger.info("Issue #%s updated but still invalid missing=%s, no notification", issue_iid, missing)
-        return "ignored"
-
-    if not assignee_usernames:
-        logger.info("Issue #%s description became valid but still no assignee, no notification", issue_iid)
-        return "ignored"
-
-    # 变更前不合规 → 变更后合规 → 通知研发认领
-    if is_bug:
-        cmd = f"ccg gitlab hotfix start {issue_iid}"
-    elif issue_type == "quickfix":
-        cmd = f"ccg gitlab quickfix start {issue_iid}"
-    else:
-        cmd = f"ccg gitlab feature start {issue_iid}"
-    type_label = {"bug": "Bug", "improve": "优化", "quickfix": "快速迭代"}.get(issue_type or "", "需求")
-    assignee_str = "、".join(assignee_names) if assignee_names else "（待指派）"
-    merge_hint = "\n> ⚠️ 快速迭代分支直接合入 `main`，无需走 pre 验收" if issue_type == "quickfix" else ""
-    content = (
-        f"### {type_label} Issue 格式已补全，可以认领\n"
-        f"> **Issue #{issue_iid}**：{issue_title}\n"
-        f"> **提出人**：{reporter_name}\n"
-        f"> **负责人**：{assignee_str}\n"
-        f"> [查看 Issue]({issue_url})\n\n"
-        f"**下一步 · {assignee_str or '研发'}**\n"
-        f"> 产品已补充完整 Issue 格式，执行以下命令认领：\n"
-        f"> `{cmd}`"
-        f"{merge_hint}"
-    )
-    at_mobiles = config.resolve_wechat_ids(assignee_usernames or [reporter_username])
-    logger.info("Issue #%s became valid, notifying assignees=%s", issue_iid, assignee_usernames)
-    send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
-    return "ok"
 
 
 # ──────────────────────────────────────────────────────────────
