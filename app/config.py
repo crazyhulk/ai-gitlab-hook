@@ -56,10 +56,6 @@ class Config:
     frontend_required_reviewers: list[str] = field(
         default_factory=lambda: ["yangzhengpeng01", "wangqiyuan01", "xuying13"]
     )
-    # hotfix 合入 main 后，超过此小时数未同步 pre 则触发告警
-    hotfix_sync_threshold_hours: int = 4
-    # 内部定时检查热修同步状态的间隔秒数（默认每分钟一次）
-    hotfix_sync_check_interval_seconds: int = 60
     # 由 __post_init__ 按 gitlab.url/token 自动初始化，无需手动设置
     gitlab_client: GitLabClient | None = field(default=None, init=False, repr=False)
 
@@ -148,20 +144,6 @@ def load_config(path: str = "config.yaml") -> Config:
         )
     )
 
-    hotfix_sync_threshold_hours = int(
-        os.environ.get(
-            "HOTFIX_SYNC_THRESHOLD_HOURS",
-            str(data.get("hotfix_sync_threshold_hours", 4)),
-        )
-    )
-
-    hotfix_sync_check_interval_seconds = int(
-        os.environ.get(
-            "HOTFIX_SYNC_CHECK_INTERVAL",
-            str(data.get("hotfix_sync_check_interval_seconds", 3600)),
-        )
-    )
-
     return Config(
         server=ServerConfig(
             host=str(s.get("host", "0.0.0.0")),
@@ -191,6 +173,4 @@ def load_config(path: str = "config.yaml") -> Config:
         hotfix_required_approvals=hotfix_required_approvals,
         frontend_review_path=frontend_review_path,
         frontend_required_reviewers=frontend_required_reviewers,
-        hotfix_sync_threshold_hours=hotfix_sync_threshold_hours,
-        hotfix_sync_check_interval_seconds=hotfix_sync_check_interval_seconds,
     )

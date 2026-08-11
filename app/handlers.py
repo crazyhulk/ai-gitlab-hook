@@ -811,17 +811,6 @@ def _on_mr_merged(
     project_id = project.get("id")
     project_name = project.get("name", "")
 
-    # main → pre 热修同步完成，清除待同步记录
-    if source_branch == config.main_branch and target_branch == config.pre_branch:
-        if project_id:
-            cleared = state.clear_hotfix_sync_pending(project_id)
-            if cleared:
-                logger.info(
-                    "Cleared %s hotfix_sync_pending records after main→pre sync project=%s",
-                    cleared, project_name,
-                )
-        return "ignored"
-
     if not _is_feature_or_hotfix_branch(source_branch):
         return "ignored"
 
@@ -870,19 +859,6 @@ def _on_mr_merged(
         )
         send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
         return "ok"
-
-    # 热修合入 main：记录待同步 pre，后续通过 /check-hotfix-sync 定期检查是否超时
-    if is_hotfix_to_main and project_id:
-        state.record_hotfix_sync_pending(
-            project_id=project_id,
-            project=project_name,
-            mr_iid=mr_iid,
-            mr_title=mr_title,
-            mr_url=mr_url,
-            operator=author_username,
-            operator_name=author_name,
-        )
-        logger.info("Recorded hotfix_sync_pending MR !%s project=%s", mr_iid, project_name)
 
     return "ignored"
 
@@ -1445,95 +1421,3 @@ def handle_push_event(payload: dict[str, Any], config: Config) -> str:
         return "ignored"
 
     return "ok"
-
-
-# ──────────────────────────────────────────────────────────────
-# 热修同步检查（内部定时任务 + 手动触发接口共用）
-# ──────────────────────────────────────────────────────────────
-
-def _clear_synced_projects(config: Config) -> None:
-    """对有 pending 记录的项目，通过 compare API 检查 pre 是否已包含 main 的内容。
-
-    如果 main 相对 pre 没有多余的 commit（git log pre..main 为空），
-    说明 pre 已经 rebase 了 main，清除该项目的待同步记录。
-    """
-    if config.gitlab_client is None:
-        return
-    pending_pids = state.list_pending_project_ids()
-    for pid in pending_pids:
-        try:
-            result = config.gitlab_client.compare_branches(pid, config.pre_branch, config.main_branch)
-            if not result:
-                continue
-            commits = result.get("commits") or []
-            if len(commits) == 0:
-                cleared = state.clear_hotfix_sync_pending(pid)
-                logger.info(
-                    "Auto-cleared %s hotfix_sync_pending: pre already contains main (project_id=%s)",
-                    cleared, pid,
-                )
-        except Exception as exc:
-            logger.warning("Failed to compare branches for project_id=%s: %s", pid, exc)
-
-
-def run_hotfix_sync_check(config: Config) -> list[dict]:
-    """检查热修合入 main 后超时未同步 pre 的记录，发送企微告警并写入违规记录。
-
-    返回本次触发告警的记录列表。
-    """
-    # 先清除已同步的项目，避免误报
-    _clear_synced_projects(config)
-
-    overdue = state.list_overdue_hotfix_syncs(config.hotfix_sync_threshold_hours)
-    if not overdue:
-        return []
-
-    by_project: dict[int, list[dict]] = {}
-    for item in overdue:
-        pid = item["project_id"]
-        by_project.setdefault(pid, []).append(item)
-
-    alerted: list[dict] = []
-    for project_id, items in by_project.items():
-        project_name = items[0]["project"]
-        mr_lines = "\n".join(
-            f"> - MR !{it['mr_iid']}：[{it['mr_title']}]({it['mr_url']}) "
-            f"（{it['operator_name']}，合入时间：{it['created_at']}）"
-            for it in items
-        )
-        content = (
-            f"### ⏰ 热修代码未及时同步 pre\n"
-            f"> **项目**：{project_name}\n"
-            f"> 以下热修 MR 合入 `main` 已超过 **{config.hotfix_sync_threshold_hours} 小时**，"
-            f"尚未同步到 `pre`：\n"
-            f"{mr_lines}\n\n"
-            f"**下一步**\n"
-            f"> 请将 `backend-pre` rebase 到最新的 `main` 后强推：\n"
-            f"> ```\n"
-            f"> git checkout backend-pre\n"
-            f"> git pull\n"
-            f"> git fetch origin main\n"
-            f"> git rebase origin/main\n"
-            f"> git push --force-with-lease\n"
-            f"> ```"
-        )
-        at_mobiles = config.tl_mobiles
-        logger.warning(
-            "Hotfix sync overdue project=%s mr_count=%s threshold_hours=%s",
-            project_name, len(items), config.hotfix_sync_threshold_hours,
-        )
-        state.record_violation(
-            operator="",
-            operator_name="",
-            violation_type="hotfix_sync_overdue",
-            description=(
-                f"热修合入 main 超过 {config.hotfix_sync_threshold_hours} 小时未同步 pre，"
-                f"涉及 MR: {[it['mr_iid'] for it in items]}"
-            ),
-            project=project_name,
-            detail={"project_id": project_id, "mr_iids": [it["mr_iid"] for it in items]},
-        )
-        send_webhook(config.wechat.webhook_url, content, at_mobiles=at_mobiles)
-        alerted.extend(items)
-
-    return alerted

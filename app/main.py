@@ -1,4 +1,3 @@
-import asyncio
 import json
 import time
 import uuid
@@ -10,25 +9,10 @@ from fastapi.responses import JSONResponse
 
 from . import state
 from .config import load_config
-from .handlers import run_hotfix_sync_check
 from .logger import get_logger, set_request_id, set_request_path, setup_logging
 from .webhook import router as webhook_router
 
 logger = get_logger(__name__)
-
-
-async def _hotfix_sync_loop() -> None:
-    config = state.get_config()
-    interval = config.hotfix_sync_check_interval_seconds
-    logger.info("Hotfix sync checker started interval=%ss threshold=%sh", interval, config.hotfix_sync_threshold_hours)
-    while True:
-        await asyncio.sleep(interval)
-        try:
-            logger.info("Hotfix sync check: scanning overdue records (threshold=%sh)", config.hotfix_sync_threshold_hours)
-            alerted = run_hotfix_sync_check(state.get_config())
-            logger.info("Hotfix sync check: done alerted=%s", len(alerted))
-        except Exception as exc:
-            logger.exception("Hotfix sync check failed: %s", exc)
 
 
 @asynccontextmanager
@@ -45,13 +29,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         bool(config.wechat.webhook_url),
         bool(config.gitlab.secret_token),
     )
-    task = asyncio.create_task(_hotfix_sync_loop())
     yield
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
     logger.info("Service shutting down")
 
 

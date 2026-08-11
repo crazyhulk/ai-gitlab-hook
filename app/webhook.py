@@ -4,7 +4,7 @@ from typing import Any
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 
 from . import state
-from .handlers import handle_issue_event, handle_mr_event, handle_note_event, handle_push_event, run_hotfix_sync_check
+from .handlers import handle_issue_event, handle_mr_event, handle_note_event, handle_push_event
 from .logger import get_logger
 
 logger = get_logger(__name__)
@@ -24,14 +24,6 @@ async def get_violations(
 ) -> dict:
     records = state.list_violations(start, end)
     return {"total": len(records), "items": records}
-
-
-@router.get("/check-hotfix-sync")
-async def check_hotfix_sync() -> dict:
-    """手动触发热修同步超时检查（服务内部会自动定时执行，此接口供调试/手动补跑使用）。"""
-    config = state.get_config()
-    alerted = run_hotfix_sync_check(config)
-    return {"total": len(alerted), "items": alerted}
 
 
 @router.post("/gitlab/webhook")

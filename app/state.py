@@ -30,6 +30,7 @@ def _get_conn() -> sqlite3.Connection:
             """
             DROP TABLE IF EXISTS invalid_issues;
             DROP TABLE IF EXISTS pre_verifications;
+            DROP TABLE IF EXISTS hotfix_sync_pending;
 
             CREATE TABLE IF NOT EXISTS violations (
                 id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,18 +45,6 @@ def _get_conn() -> sqlite3.Connection:
 
             CREATE INDEX IF NOT EXISTS idx_violations_created_at
                 ON violations (created_at);
-
-            CREATE TABLE IF NOT EXISTS hotfix_sync_pending (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                created_at    TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
-                project_id    INTEGER NOT NULL,
-                project       TEXT    NOT NULL DEFAULT '',
-                mr_iid        INTEGER NOT NULL,
-                mr_title      TEXT    NOT NULL DEFAULT '',
-                mr_url        TEXT    NOT NULL DEFAULT '',
-                operator      TEXT    NOT NULL DEFAULT '',
-                operator_name TEXT    NOT NULL DEFAULT ''
-            );
             """
         )
         _conn.commit()
@@ -108,68 +97,6 @@ def record_violation(
         )
         conn.commit()
         return cur.lastrowid  # type: ignore[return-value]
-
-
-def record_hotfix_sync_pending(
-    project_id: int,
-    project: str,
-    mr_iid: int,
-    mr_title: str,
-    mr_url: str,
-    operator: str,
-    operator_name: str,
-) -> int:
-    with _db_lock:
-        conn = _get_conn()
-        cur = conn.execute(
-            """
-            INSERT INTO hotfix_sync_pending
-                (project_id, project, mr_iid, mr_title, mr_url, operator, operator_name)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (project_id, project, mr_iid, mr_title, mr_url, operator, operator_name),
-        )
-        conn.commit()
-        return cur.lastrowid  # type: ignore[return-value]
-
-
-def clear_hotfix_sync_pending(project_id: int) -> int:
-    """删除指定项目的所有待同步记录，返回删除行数。"""
-    with _db_lock:
-        conn = _get_conn()
-        cur = conn.execute(
-            "DELETE FROM hotfix_sync_pending WHERE project_id = ?",
-            (project_id,),
-        )
-        conn.commit()
-        return cur.rowcount
-
-
-def list_pending_project_ids() -> list[int]:
-    """返回所有有待同步记录的 project_id 列表（去重）。"""
-    with _db_lock:
-        conn = _get_conn()
-        rows = conn.execute(
-            "SELECT DISTINCT project_id FROM hotfix_sync_pending"
-        ).fetchall()
-        return [row[0] for row in rows]
-
-
-def list_overdue_hotfix_syncs(threshold_hours: int = 4) -> list[dict]:
-    """返回超时未同步的记录（created_at 距今超过 threshold_hours 小时）。"""
-    with _db_lock:
-        conn = _get_conn()
-        rows = conn.execute(
-            """
-            SELECT id, created_at, project_id, project, mr_iid, mr_title, mr_url,
-                   operator, operator_name
-            FROM hotfix_sync_pending
-            WHERE created_at <= datetime('now', 'localtime', ? || ' hours')
-            ORDER BY created_at ASC
-            """,
-            (f"-{threshold_hours}",),
-        ).fetchall()
-        return [dict(row) for row in rows]
 
 
 def list_violations(start: str, end: str) -> list[dict]:

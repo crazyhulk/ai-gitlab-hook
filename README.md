@@ -107,7 +107,6 @@ Issue 类型根据 description 中的模板章节自动识别，无需标题前�
 | MR 标题不符规范 | `issue_*` MR 标题不以 `[需求]` 开头，或 `hotfix_*` 不以 `[Bug热修]` 开头 | 操作人 + TL |
 | Issue 未验收即关闭 | 需求/优化 Issue 关闭时查 GitLab API，`product:pass` 和 `developer:pass` 均需完成 | 操作人 + TL |
 | MR 审批不足即合并 | `issue_*`/`hotfix_*` MR 合并时查 GitLab API，Approve 不足（`hotfix_*` → `main` 需 N 人，其余需 1 人） | 操作人 + TL |
-| 热修未及时同步 pre | 热修 MR 合入 `main` 后超过 `hotfix_sync_threshold_hours`（默认 4 小时）未同步到 `pre`（需 `backend-pre` rebase `main` 后 `--force-with-lease` 强推） | TL |
 
 ### 热修双路径
 
@@ -149,7 +148,6 @@ http://<your-server>:<port>/gitlab/webhook
 | GET | `/health` | 健康检查 |
 | POST | `/gitlab/webhook` | GitLab Webhook 接收 |
 | GET | `/violations` | 查询违规记录（用于日报） |
-| GET | `/check-hotfix-sync` | 手动触发热修同步超时检查（服务内部会自动定时执行） |
 
 ### 违规记录查询
 
@@ -179,12 +177,6 @@ GET /violations?start=2026-05-01&end=2026-05-16
 
 `start` / `end` 默认为当天，格式 `YYYY-MM-DD`。
 
-### 热修同步超时检查
-
-服务启动后在后台按 `hotfix_sync_check_interval_seconds`（默认 60 秒）自动循环检查：热修 MR 合入 `main` 后是否在 `hotfix_sync_threshold_hours`（默认 4 小时）内完成了 `main → pre` 同步。检测通过 GitLab compare API 比较 `pre..main`，如果没有多余提交则视为已同步；`pre` 分支正确的同步方式是 `backend-pre` rebase 到最新 `main` 后 `git push --force-with-lease`。超时的项目会收到企微告警并写入 `hotfix_sync_overdue` 违规记录。
-
-`/check-hotfix-sync` 接口用于手动触发（调试或补跑），返回本次告警的记录列表。
-
 ## 配置说明
 
 配置优先级：**环境变量 > config.yaml**
@@ -201,8 +193,6 @@ GET /violations?start=2026-05-01&end=2026-05-16
 | `hotfix_required_approvals` | `HOTFIX_REQUIRED_APPROVALS` | 热修紧急路径（→ `main`）所需最少 Approve 人数，默认 2；非紧急路径（→ `pre`）固定为 1 |
 | `frontend_review_path` | `FRONTEND_REVIEW_PATH` | 需要指定 Reviewer 审批的目录，默认 `frontend-v1/` |
 | `frontend_required_reviewers` | `FRONTEND_REQUIRED_REVIEWERS=user1,user2` | 前端目录允许的 Reviewer，任一人 Approve 即通过 |
-| `hotfix_sync_threshold_hours` | `HOTFIX_SYNC_THRESHOLD_HOURS` | 热修合入 `main` 后超过此小时数未同步 `pre` 则告警，默认 4 |
-| `hotfix_sync_check_interval_seconds` | `HOTFIX_SYNC_CHECK_INTERVAL` | 内部定时检查热修同步状态的间隔秒数，默认 60（1 分钟） |
 | `user_map.<username>` | `WECHAT_USER_<username>=<mobile>` | GitLab 用户名 → 企业微信手机号映射 |
 | `log.level` | `LOG_LEVEL` | 日志级别：`DEBUG` / `INFO` / `WARNING` / `ERROR` |
 
@@ -344,7 +334,7 @@ app/
 ├── config.py          # 配置加载（config.yaml + 环境变量），初始化 GitLabClient
 ├── gitlab_client.py   # GitLab API 客户端（Issue / Note / MR 查询 + Commit Status 设置）
 ├── wechat.py          # 企业微信 Webhook 发送
-├── state.py           # SQLite 持久化：violations 违规记录 + hotfix_sync_pending 待同步记录
+├── state.py           # SQLite 持久化：violations 违规记录
 └── logger.py          # 结构化日志
 service.sh             # 进程管理脚本（start/stop/restart/status，优雅关闭）
 requirements.txt       # Python 依赖

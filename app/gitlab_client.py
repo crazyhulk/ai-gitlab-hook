@@ -102,25 +102,6 @@ class GitLabClient:
         )
         return result.get("changes") or []
 
-    def compare_branches(self, project_id: int, from_branch: str, to_branch: str) -> dict:
-        """比较两个分支，返回 to 相对 from 的 commits 和 diffs。
-
-        默认 straight=false，即 three-dot 比较（git log from..to）。
-        如果返回 commits 为空，说明 to 的所有 commit 都可从 from 到达。
-        """
-        try:
-            return self._request(
-                "GET",
-                f"/projects/{project_id}/repository/compare",
-                params={"from": from_branch, "to": to_branch},
-            )
-        except GitLabError as e:
-            logger.warning(
-                "compare_branches from=%s to=%s project=%s failed: %s",
-                from_branch, to_branch, project_id, e,
-            )
-            return {}
-
     def get_merged_mrs_to_pre(self, project_id: int, pre_branch: str = "pre") -> list[dict]:
         mrs: list[dict] = []
         page = 1
